@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="GrokBuild to Grok Bots">
+  <!-- Solid plate required by Cursor marketplace (no transparency-only) -->
+  <rect width="512" height="512" fill="#0c0c14"/>
+
+  <!-- Soft teal HUD wash over solid plate -->
+  <circle cx="256" cy="236" r="168" fill="#0d9488" opacity="0.12"/>
+  <circle cx="256" cy="236" r="112" fill="#06b6d4" opacity="0.07"/>
+
+  <!-- Tech-HUD corner brackets -->
+  <g fill="none" stroke="#0d9488" stroke-width="12" stroke-linecap="square">
+    <path d="M64 136 V72 H128"/>
+    <path d="M448 136 V72 H384"/>
+    <path d="M64 376 V440 H128"/>
+    <path d="M448 376 V440 H384"/>
+  </g>
+  <g fill="#2dd4bf">
+    <rect x="64" y="72" width="20" height="12"/>
+    <rect x="64" y="72" width="12" height="20"/>
+    <rect x="428" y="72" width="20" height="12"/>
+    <rect x="436" y="72" width="12" height="20"/>
+    <rect x="64" y="428" width="20" height="12"/>
+    <rect x="64" y="420" width="12" height="20"/>
+    <rect x="428" y="428" width="20" height="12"/>
+    <rect x="436" y="420" width="12" height="20"/>
+  </g>
+
+  <!-- Outer chip frame -->
+  <rect x="112" y="120" width="288" height="272" rx="40" fill="#14141f" stroke="#0d9488" stroke-width="10"/>
+  <!-- Inner panel -->
+  <rect x="140" y="148" width="232" height="216" rx="28" fill="#0c0c14" stroke="#1a3a3a" stroke-width="3"/>
+
+  <!-- GrokBuild prompt (left) fanning out to bot lanes (right) -->
+  <g stroke-linecap="round">
+    <path d="M166 192 L196 216 L166 240" fill="none" stroke="#5eead4" stroke-width="14" stroke-linejoin="round"/>
+    <path d="M178 270 H214" stroke="#14b8a6" stroke-width="12"/>
+    <path d="M224 228 H236" stroke="#14b8a6" stroke-width="8" opacity="0.7"/>
+    <path d="M268 210 L292 184 H340" fill="none" stroke="#0d9488" stroke-width="16" stroke-linejoin="round"/>
+    <path d="M290 228 H340" stroke="#14b8a6" stroke-width="16"/>
+    <path d="M268 246 L292 272 H340" fill="none" stroke="#0d9488" stroke-width="16" stroke-linejoin="round" opacity="0.8"/>
+  </g>
+
+  <!-- Relay hub -->
+  <circle cx="256" cy="228" r="34" fill="#0d9488"/>
+  <path d="M248 214 L268 228 L248 242 Z" fill="#99f6e4"/>
+
+  <!-- Lane endpoint nodes -->
+  <g>
+    <circle cx="340" cy="184" r="14" fill="#5eead4"/>
+    <circle cx="340" cy="228" r="14" fill="#5eead4"/>
+    <circle cx="340" cy="272" r="14" fill="#5eead4"/>
+    <circle cx="340" cy="228" r="6" fill="#0c0c14"/>
+  </g>
+
+  <!-- Bottom status bar (HUD chrome) -->
+  <rect x="172" y="318" width="168" height="22" rx="11" fill="#1a1a28"/>
+  <rect x="172" y="318" width="104" height="22" rx="11" fill="#0d9488"/>
+  <rect x="288" y="323" width="40" height="12" rx="6" fill="#2dd4bf" opacity="0.55"/>
+
+  <rect x="384" y="348" width="12" height="12" rx="3" fill="#d97706" opacity="0.6"/>
+</svg>
