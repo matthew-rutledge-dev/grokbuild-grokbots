@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "grokbots": {
+      "command": "node",
+      "args": [
+        "${CURSOR_PLUGIN_ROOT}/mcp/grokbots/dist/index.js"
+      ],
+      "cwd": "${CURSOR_PLUGIN_ROOT}/mcp/grokbots",
+      "env": {
+        "GROKBOTS_WEBHOOK_URL": "${GROKBOTS_WEBHOOK_URL}",
+        "GROKBOTS_WEBHOOK_KEY": "${GROKBOTS_WEBHOOK_KEY}",
+        "GROKBOTS_DEFAULT_BOT": "${GROKBOTS_DEFAULT_BOT}",
+        "GROKBOTS_ROSTER_FILE": "${GROKBOTS_ROSTER_FILE}",
+        "GROKBOTS_SENDER": "${GROKBOTS_SENDER}",
+        "GROKBOTS_READ_ONLY": "${GROKBOTS_READ_ONLY}"
+      }
+    }
+  }
+}

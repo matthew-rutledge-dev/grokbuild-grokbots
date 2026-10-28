@@ -1,0 +1,67 @@
+{
+  "name": "grokbuild-grokbots",
+  "displayName": "GrokBuild to Grok Bots",
+  "version": "0.1.0",
+  "description": "Let Grok Build (or Cursor) wake a Grok Bot or send it a prompt through the bot's own webhook-triggered routine. One grokbots MCP server with a roster, confirm-gated sends and an optional read-only mode, plus setup skills. Each installer uses their own routine URL and key.",
+  "author": {
+    "name": "Matthew Rutledge"
+  },
+  "homepage": "https://github.com/matthew-rutledge-dev/grokbuild-grokbots",
+  "repository": "https://github.com/matthew-rutledge-dev/grokbuild-grokbots",
+  "license": "MIT",
+  "keywords": [
+    "grok-bot",
+    "grok-build",
+    "mcp",
+    "webhook",
+    "routine",
+    "wake",
+    "roster",
+    "read-only"
+  ],
+  "category": "developer-tools",
+  "tags": [
+    "grok-bot",
+    "mcp",
+    "webhook"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "GROKBOTS_WEBHOOK_URL": {
+        "type": "string",
+        "title": "Default bot webhook URL",
+        "description": "Optional. POST URL of YOUR Grok Bot's webhook-triggered routine (copy it from the routine panel; placeholder example https://example.com/webhook). https only. Leave blank if you use GROKBOTS_ROSTER_FILE only."
+      },
+      "GROKBOTS_WEBHOOK_KEY": {
+        "type": "string",
+        "title": "Default bot webhook key",
+        "description": "Optional. The routine's sender key, sent as Authorization: Bearer and X-Automation-Key. Your own key; never commit or paste it in chat."
+      },
+      "GROKBOTS_DEFAULT_BOT": {
+        "type": "string",
+        "title": "Default bot name",
+        "description": "Optional. Roster name for the env-configured bot (lowercase, e.g. example-agent). Default: default."
+      },
+      "GROKBOTS_ROSTER_FILE": {
+        "type": "string",
+        "title": "Roster file",
+        "description": "Optional. Absolute path to a JSON roster of several bots ({\"bots\":[{\"name\",\"url\" or \"urlEnv\",\"keyEnv\" or \"keyFile\"}]}). Keys are never stored inline."
+      },
+      "GROKBOTS_SENDER": {
+        "type": "string",
+        "title": "Sender label",
+        "description": "Optional. Short label sent as \"from\" in each POST so the bot knows who woke it. Default: grokbuild."
+      },
+      "GROKBOTS_READ_ONLY": {
+        "type": "string",
+        "title": "Read-only mode",
+        "description": "Optional. Set to 1 (or true/yes/on) to hide wake_bot and send_prompt. Unset, empty, 0, false, no or off = all tools. Any other value also turns read-only ON (fails closed, with a warning)."
+      }
+    },
+    "required": []
+  },
+  "logo": "assets/logo.svg"
+}
