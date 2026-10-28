@@ -80,11 +80,13 @@ test("stdio: 5 tools; dry-run sends nothing; confirm=true POSTs once with both k
     assert.equal(mock.hits[0].headers["x-automation-key"], KEY);
     assert.equal(mock.hits[0].body.kind, "prompt");
     assert.equal(mock.hits[0].body.prompt, "hello from a test");
+    assert.equal(mock.hits[0].body.bot, "example-agent");
     assert.ok(!JSON.stringify(sent).includes(KEY));
 
     const wake = json(await client.callTool({ name: "wake_bot", arguments: { reason: "test", confirm: true } }));
     assert.equal(wake.ok, true);
     assert.equal(mock.hits[1].body.kind, "wake");
+    assert.equal(mock.hits[1].body.bot, "example-agent");
 
     const big = json(await client.callTool({ name: "send_prompt", arguments: { prompt: "x".repeat(8001), confirm: true } }));
     assert.equal(big.sent, false);
@@ -107,6 +109,56 @@ test("stdio: wrong key -> not accepted (401), reported, key not echoed", async (
   } finally {
     await client.close();
     await mock.close();
+  }
+});
+
+test("stdio: payload names the roster entry that sent it (bot field, no secrets)", async () => {
+  const mock = await mockRoutine();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grokbots-"));
+  const keyFile = path.join(dir, "k.key");
+  fs.writeFileSync(keyFile, KEY);
+  const rosterFile = path.join(dir, "roster.json");
+  fs.writeFileSync(
+    rosterFile,
+    JSON.stringify({ bots: [{ name: "agent-one", url: mock.url, keyFile }, { name: "agent-two", url: mock.url, keyFile }] }),
+  );
+  const client = await connect({ GROKBOTS_ROSTER_FILE: rosterFile });
+  try {
+    const dry = json(await client.callTool({ name: "send_prompt", arguments: { bot: "agent-two", prompt: "hi" } }));
+    assert.equal((dry.payload as Record<string, unknown>).bot, "agent-two");
+    assert.equal(mock.hits.length, 0);
+
+    const a = json(await client.callTool({ name: "send_prompt", arguments: { bot: "agent-two", prompt: "hi", confirm: true } }));
+    const b = json(await client.callTool({ name: "wake_bot", arguments: { bot: "agent-one", confirm: true } }));
+    assert.equal(a.ok, true);
+    assert.equal(b.ok, true);
+    assert.equal(mock.hits.length, 2);
+    assert.equal(mock.hits[0].body.bot, "agent-two");
+    assert.equal(mock.hits[1].body.bot, "agent-one");
+    for (const h of mock.hits) {
+      assert.ok(!JSON.stringify(h.body).includes(KEY));
+      assert.ok(!JSON.stringify(h.body).includes(keyFile));
+    }
+  } finally {
+    await client.close();
+    await mock.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stdio: no HTTP response -> sent is \"unknown\", not retried", async () => {
+  const mock = await mockRoutine();
+  const url = mock.url;
+  await mock.close(); // nothing listening now
+  const client = await connect({ GROKBOTS_WEBHOOK_URL: url, GROKBOTS_WEBHOOK_KEY: KEY });
+  try {
+    const r = json(await client.callTool({ name: "wake_bot", arguments: { confirm: true } }));
+    assert.equal(r.ok, false);
+    assert.equal(r.sent, "unknown");
+    assert.equal(r.error, "webhook_network_error");
+    assert.ok(!JSON.stringify(r).includes(KEY));
+  } finally {
+    await client.close();
   }
 });
 

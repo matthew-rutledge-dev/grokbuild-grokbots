@@ -58,7 +58,7 @@ const ALL_TOOLS = [
   {
     name: "wake_bot",
     description:
-      "Wake a Grok Bot by POSTing a small JSON wake event ({kind:\"wake\", reason}) to its webhook-triggered routine. Dry-run preview unless confirm=true. One try, 8 s timeout. Hidden in read-only mode.",
+      "Wake a Grok Bot by POSTing a small JSON wake event ({kind:\"wake\", reason, bot}) to its webhook-triggered routine. Dry-run preview unless confirm=true. One try, 8 s timeout. Hidden in read-only mode.",
     inputSchema: {
       type: "object",
       properties: {
@@ -72,7 +72,7 @@ const ALL_TOOLS = [
   {
     name: "send_prompt",
     description:
-      `Send a prompt to a Grok Bot through its webhook-triggered routine ({kind:\"prompt\", prompt}). The bot's routine treats it as untrusted data. Dry-run preview unless confirm=true. Max ${MAX_PROMPT_CHARS} chars, one try, 8 s timeout. No reply is returned here; the bot answers in its own app/channel. Hidden in read-only mode.`,
+      `Send a prompt to a Grok Bot through its webhook-triggered routine ({kind:\"prompt\", prompt, bot}). The bot's routine treats it as untrusted data. Dry-run preview unless confirm=true. Max ${MAX_PROMPT_CHARS} chars, one try, 8 s timeout. No reply is returned here; the bot answers in its own app/channel. Hidden in read-only mode.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -148,7 +148,7 @@ async function deliver(bot: BotEntry, payload: Record<string, unknown>, confirm:
       error: res.error,
       note: accepted
         ? "Routine accepted the POST (expect HTTP 200 with {success:true, runUuid}). The bot runs it on its own; no reply comes back here."
-        : "Not accepted. webhook_http_401/403 = wrong key or header, webhook_http_404 = wrong URL or deleted routine, webhook_timeout / webhook_network_error = no HTTP response. Not retried.",
+        : "Not accepted. webhook_http_401/403 = wrong key or header, webhook_http_404 = wrong URL or deleted routine, webhook_timeout / webhook_network_error = no HTTP response (sent: \"unknown\", the routine may or may not have received it). Not retried.",
     },
     !accepted,
   );
@@ -199,6 +199,7 @@ export async function handleTool(
       const payload = {
         kind: "wake",
         reason: reason || "wake requested",
+        bot: p.bot.name,
         from: sender(),
         sentAt: new Date().toISOString(),
         requestId: crypto.randomUUID(),
@@ -217,6 +218,7 @@ export async function handleTool(
       const payload: Record<string, unknown> = {
         kind: "prompt",
         prompt,
+        bot: p.bot.name,
         from: sender(),
         sentAt: new Date().toISOString(),
         requestId: crypto.randomUUID(),
