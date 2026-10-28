@@ -4,6 +4,7 @@
  * for the Grok Bot webhook routine: no real webhook is called.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -101,10 +102,34 @@ test("stdio: wrong key -> not accepted (401), reported, key not echoed", async (
     const r = json(await client.callTool({ name: "wake_bot", arguments: { confirm: true } }));
     assert.equal(r.ok, false);
     assert.equal(r.httpStatus, 401);
+    assert.equal(r.error, "webhook_http_401");
     assert.ok(!JSON.stringify(r).includes("wrong-key-22222222"));
   } finally {
     await client.close();
     await mock.close();
+  }
+});
+
+test("stdio: key with a line break -> nothing sent, key not echoed", async () => {
+  const mock = await mockRoutine();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grokbots-"));
+  const keyFile = path.join(dir, "b.key");
+  fs.writeFileSync(keyFile, "split-secret-one\nsplit-secret-two\n");
+  const rosterFile = path.join(dir, "roster.json");
+  fs.writeFileSync(rosterFile, JSON.stringify({ bots: [{ name: "example-agent", url: mock.url, keyFile }] }));
+  const client = await connect({ GROKBOTS_ROSTER_FILE: rosterFile });
+  try {
+    const r = json(await client.callTool({ name: "wake_bot", arguments: { confirm: true } }));
+    assert.equal(r.ok, false);
+    assert.equal(r.sent, false);
+    assert.equal(mock.hits.length, 0);
+    const out = JSON.stringify(r) + JSON.stringify(json(await client.callTool({ name: "list_bots", arguments: {} })));
+    assert.ok(!out.includes("split-secret-one"));
+    assert.ok(!out.includes("split-secret-two"));
+  } finally {
+    await client.close();
+    await mock.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

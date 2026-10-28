@@ -10,10 +10,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
-    "test": "node --import tsx --test test/env.test.ts test/roster.test.ts test/stdio.test.ts"
+    "test": "node --import tsx --test test/env.test.ts test/roster.test.ts test/webhook.test.ts test/stdio.test.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^22.13.10",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"

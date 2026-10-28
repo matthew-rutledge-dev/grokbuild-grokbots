@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { checkUrl, loadRoster, publicBot, redactUrl } from "../src/roster.js";
+import { ROSTER_NOT_JSON, checkUrl, loadRoster, publicBot, redactUrl } from "../src/roster.js";
 import { listTools } from "../src/tools.js";
 
 const KEY = "placeholder-key-11111111";
@@ -59,6 +59,60 @@ test("roster file: keyEnv / keyFile, inline key rejected, duplicates dropped", (
   assert.ok(r.errors.some((e) => e.includes("duplicate")));
   assert.ok(r.errors.some((e) => e.includes("invalid name")));
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("roster file that is not valid JSON: fixed message, no file contents quoted", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grokbots-"));
+  const file = path.join(dir, "roster.json");
+  const inlineKey = "inline-secret-22222222";
+  fs.writeFileSync(file, `{ "bots": [ { "name": "example-agent", "key": "${inlineKey}" } ], oops }`);
+  try {
+    const r = loadRoster({ GROKBOTS_ROSTER_FILE: file });
+    assert.deepEqual(r.errors, [ROSTER_NOT_JSON]);
+    assert.equal(r.errors[0], "GROKBOTS_ROSTER_FILE is not valid JSON");
+    assert.ok(!JSON.stringify(r.errors).includes(inlineKey));
+    assert.ok(!JSON.stringify(r.errors).includes(dir));
+    assert.equal(r.bots.length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("roster file missing: fixed message without the path", () => {
+  const missing = path.join(os.tmpdir(), "grokbots-missing-dir-33333333", "roster.json");
+  const r = loadRoster({ GROKBOTS_ROSTER_FILE: missing });
+  assert.deepEqual(r.errors, ["GROKBOTS_ROSTER_FILE could not be read"]);
+});
+
+test("roster values that may be keys are never echoed (invalid name, bad keyEnv, bad key format)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grokbots-"));
+  const file = path.join(dir, "roster.json");
+  const pasted = "pasted-secret-44444444";
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      bots: [
+        { name: pasted + " !", url: "https://example.invalid/webhook/a", keyEnv: "X" },
+        { name: "example-agent", url: "https://example.invalid/webhook/b", keyEnv: pasted + "\n" },
+        { name: "example-helper", url: "https://example.invalid/webhook/c", keyEnv: "EXAMPLE_HELPER_KEY" },
+      ],
+    }),
+  );
+  try {
+    const r = loadRoster({ GROKBOTS_ROSTER_FILE: file, EXAMPLE_HELPER_KEY: "two\nlines" });
+    const out = JSON.stringify({ errors: r.errors, bots: r.bots.map(publicBot) });
+    assert.ok(!out.includes(pasted));
+    assert.ok(!out.includes("two"));
+    assert.deepEqual(r.bots.map((b) => b.name), ["example-agent", "example-helper"]);
+    assert.ok(r.errors.some((e) => e.includes("entry #1") && e.includes("invalid name")));
+    assert.ok(publicBot(r.bots[0]).problems.includes("keyEnv is not a valid environment variable name"));
+    assert.ok(publicBot(r.bots[1]).problems.some((p) => p.includes("not valid")));
+    const env = loadRoster({ GROKBOTS_WEBHOOK_URL: "https://example.invalid/webhook/d", GROKBOTS_WEBHOOK_KEY: "two\nlines" });
+    assert.equal(publicBot(env.bots[0]).ready, false);
+    assert.ok(!JSON.stringify(publicBot(env.bots[0])).includes("two"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("read-only listing hides write tools; write tools require confirm in schema", () => {

@@ -16,6 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readEnv } from "./env.js";
+import { KEY_RE } from "./webhook.js";
 
 export type BotEntry = {
   name: string;
@@ -32,6 +33,10 @@ export type BotEntry = {
 export type Roster = { bots: BotEntry[]; errors: string[]; rosterFile?: string };
 
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+/** Environment variable names for urlEnv / keyEnv. Anything else is rejected and never echoed. */
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+export const ROSTER_NOT_JSON = "GROKBOTS_ROSTER_FILE is not valid JSON";
+export const ROSTER_UNREADABLE = "GROKBOTS_ROSTER_FILE could not be read";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 /** https only; plain http only to loopback (local testing). No credentials in the URL. */
@@ -90,6 +95,9 @@ export function loadRoster(env: NodeJS.ProcessEnv = process.env): Roster {
     const problems = checkUrl(defUrl);
     if (!NAME_RE.test(name)) problems.push("GROKBOTS_DEFAULT_BOT is not a valid name (lowercase, digits, . _ -)");
     if (!defKeySet) problems.push("GROKBOTS_WEBHOOK_KEY not set");
+    else if (!KEY_RE.test(readEnv("GROKBOTS_WEBHOOK_KEY", env) as string)) {
+      problems.push("GROKBOTS_WEBHOOK_KEY is not valid (printable ASCII only, no spaces or line breaks)");
+    }
     bots.push({
       name,
       description: readEnv("GROKBOTS_DEFAULT_BOT_DESCRIPTION", env),
@@ -104,28 +112,50 @@ export function loadRoster(env: NodeJS.ProcessEnv = process.env): Roster {
   const rosterFile = readEnv("GROKBOTS_ROSTER_FILE", env);
   if (rosterFile) {
     let parsed: unknown;
+    let text: string | undefined;
+    // Fixed messages only: fs / JSON.parse errors can quote paths or file contents (and so a key).
     try {
-      parsed = JSON.parse(fs.readFileSync(expandHome(rosterFile), "utf8"));
-    } catch (e) {
-      errors.push(`GROKBOTS_ROSTER_FILE could not be read as JSON: ${(e as Error).message.split("\n")[0]}`);
+      text = fs.readFileSync(expandHome(rosterFile), "utf8");
+    } catch {
+      errors.push(ROSTER_UNREADABLE);
+    }
+    if (text !== undefined) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        errors.push(ROSTER_NOT_JSON);
+      }
     }
     const list = (parsed as { bots?: unknown })?.bots;
     if (parsed !== undefined && !Array.isArray(list)) errors.push('roster file must be {"bots": [...]}');
-    for (const item of Array.isArray(list) ? list : []) {
-      const b = (item ?? {}) as Record<string, unknown>;
+    const entries = Array.isArray(list) ? list : [];
+    for (let i = 0; i < entries.length; i++) {
+      const b = (entries[i] ?? {}) as Record<string, unknown>;
       const name = typeof b.name === "string" ? b.name.trim().toLowerCase() : "";
       const problems: string[] = [];
       if (!NAME_RE.test(name)) {
-        errors.push(`roster entry with invalid name ${JSON.stringify(b.name)} skipped`);
+        // The invalid value itself is not echoed: it could be anything, including a pasted key.
+        errors.push(`roster entry #${i + 1} has an invalid name (lowercase, digits, . _ -); skipped`);
         continue;
       }
       if ("key" in b) problems.push('inline "key" is not allowed in the roster file; use keyEnv or keyFile');
-      const url =
-        typeof b.url === "string" ? b.url.trim() : typeof b.urlEnv === "string" ? readEnv(b.urlEnv, env) : undefined;
-      problems.push(...checkUrl(url));
+      let url: string | undefined;
+      if (typeof b.url === "string") {
+        url = b.url.trim();
+        problems.push(...checkUrl(url));
+      } else if (typeof b.urlEnv === "string" && !ENV_NAME_RE.test(b.urlEnv)) {
+        problems.push("urlEnv is not a valid environment variable name");
+      } else {
+        url = typeof b.urlEnv === "string" ? readEnv(b.urlEnv, env) : undefined;
+        problems.push(...checkUrl(url));
+      }
       let readKey: () => string | undefined = () => undefined;
       let keyFrom: string | undefined;
-      if (typeof b.keyEnv === "string") {
+      if (typeof b.keyEnv === "string" && !ENV_NAME_RE.test(b.keyEnv)) {
+        // Not echoed: a malformed keyEnv may be the key itself pasted in by mistake.
+        keyFrom = "keyEnv (invalid name)";
+        problems.push("keyEnv is not a valid environment variable name");
+      } else if (typeof b.keyEnv === "string") {
         const v = b.keyEnv;
         keyFrom = v;
         readKey = () => readEnv(v, env);
@@ -136,7 +166,11 @@ export function loadRoster(env: NodeJS.ProcessEnv = process.env): Roster {
       } else {
         problems.push("no keyEnv or keyFile");
       }
-      if (keyFrom && readKey() === undefined) problems.push(`key not available from ${keyFrom}`);
+      if (keyFrom && problems.every((p) => !p.startsWith("keyEnv "))) {
+        const k = readKey();
+        if (k === undefined) problems.push(`key not available from ${keyFrom}`);
+        else if (!KEY_RE.test(k)) problems.push(`key from ${keyFrom} is not valid (printable ASCII only, no spaces or line breaks)`);
+      }
       bots.push({
         name,
         description: typeof b.description === "string" ? b.description.slice(0, 200) : undefined,

@@ -32,6 +32,7 @@ Point `GROKBOTS_ROSTER_FILE` at a JSON file outside any repo:
 ```
 
 - `keyFile` (recommended): a file holding only the key. Create it with `umask 077`, so it's mode 0600, and keep it out of git.
+- The key from `keyEnv` / `keyFile` is sent to that entry's URL on every confirmed call, so only pair a key with a URL you trust.
 - `keyEnv` / `urlEnv`: only work if the host passes that variable through to the MCP process. Many hosts only pass the declared plugin variables, so prefer `keyFile`.
 - An inline `"key"` is rejected. Names are lowercase (`a-z 0-9 . _ -`) and must be unique, and the env bot is listed first.
 

@@ -34,8 +34,9 @@ export function createServer(readOnlyState: ReadOnlyResolution): Server {
     try {
       const result = await handleTool(name, args, { readOnly: readOnlyState });
       return result ?? jsonResult({ error: `Unknown tool: ${name}` }, true);
-    } catch (err) {
-      return jsonResult({ error: err instanceof Error ? err.message : String(err) }, true);
+    } catch {
+      // Fixed text only: a raw error message could quote config or a key.
+      return jsonResult({ ok: false, sent: false, error: "internal_error: the tool failed. Nothing more is reported here." }, true);
     }
   });
   return server;

@@ -10,7 +10,7 @@ import { READ_ONLY_ENV, describeReadOnly, type ReadOnlyResolution } from "./read
 import { jsonResult, type ToolResult } from "./result.js";
 import { loadRoster, publicBot, redactUrl, type BotEntry } from "./roster.js";
 import { SERVER_NAME, VERSION } from "./version.js";
-import { postWebhook } from "./webhook.js";
+import { KEY_INVALID_MESSAGE, isValidKey, postWebhook } from "./webhook.js";
 
 export { READ_ONLY_ENV };
 
@@ -131,12 +131,15 @@ async function deliver(bot: BotEntry, payload: Record<string, unknown>, confirm:
   }
   const key = bot.readKey();
   if (!key) return jsonResult({ ok: false, sent: false, ...preview, error: "Key not available. Nothing sent." }, true);
+  if (!isValidKey(key)) {
+    return jsonResult({ ok: false, sent: false, ...preview, errorCode: "webhook_key_invalid", error: KEY_INVALID_MESSAGE }, true);
+  }
   const res = await postWebhook(bot.url as string, key, payload);
   const accepted = res.ok && (res.body as { success?: unknown })?.success !== false;
   return jsonResult(
     {
       ok: accepted,
-      sent: true,
+      sent: res.sent,
       bot: bot.name,
       target: redactUrl(bot.url),
       requestId: payload.requestId,
@@ -145,7 +148,7 @@ async function deliver(bot: BotEntry, payload: Record<string, unknown>, confirm:
       error: res.error,
       note: accepted
         ? "Routine accepted the POST (expect HTTP 200 with {success:true, runUuid}). The bot runs it on its own; no reply comes back here."
-        : "Not accepted. 401/403 = wrong key or header, 404 = wrong URL or deleted routine, 0 = network/timeout. Not retried.",
+        : "Not accepted. webhook_http_401/403 = wrong key or header, webhook_http_404 = wrong URL or deleted routine, webhook_timeout / webhook_network_error = no HTTP response. Not retried.",
     },
     !accepted,
   );

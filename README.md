@@ -78,12 +78,14 @@ Unset variables that a host passes through literally (`${GROKBOTS_WEBHOOK_URL}`)
 |---|---|---|
 | Your routine's POST URL (`GROKBOTS_WEBHOOK_URL` or roster `url`) | Only on `wake_bot` / `send_prompt` with `confirm=true` | One POST: `Content-Type: application/json`, `Authorization: Bearer <key>`, `X-Automation-Key: <key>`, 8 s timeout, no retry, no redirects |
 
-POST bodies: `{kind:"wake", reason, from, sentAt, requestId}` or `{kind:"prompt", prompt, from, replyHint?, sentAt, requestId}`. They carry no tokens. Responses are truncated to 2000 chars. Tool output redacts the URL's last path segment and never includes keys. No telemetry, no postinstall scripts, and nothing is downloaded or executed.
+POST bodies: `{kind:"wake", reason, from, sentAt, requestId}` or `{kind:"prompt", prompt, from, replyHint?, sentAt, requestId}`. They carry no tokens. Responses are truncated to 2000 chars. Tool output redacts the URL's last path segment and never includes keys. No telemetry, no postinstall scripts, and nothing downloaded at runtime (the bootstrap script runs `npm ci` once to install the pinned dependencies from the lockfile). Errors come back as fixed codes (`webhook_key_invalid`, `webhook_timeout`, `webhook_network_error`, `webhook_http_<status>`), never raw network error text, and a key that is not printable ASCII (spaces, line breaks, control characters) is refused before anything is sent.
+
+**`keyEnv` / `keyFile` send that key to that bot's URL.** Each roster entry's key goes in the headers of the POST to that entry's `url` / `urlEnv`. Only point an entry at a URL you trust with that key.
 
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 12 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # 23 tests; a loopback mock stands in for the routine
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).
