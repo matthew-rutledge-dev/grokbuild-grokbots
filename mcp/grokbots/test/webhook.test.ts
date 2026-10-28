@@ -61,6 +61,7 @@ test("network error maps to webhook_network_error, no raw message", async () => 
   assert.equal(r.ok, false);
   assert.equal(r.status, 0);
   assert.equal(r.error, "webhook_network_error");
+  assert.equal(r.sent, "unknown");
   const out = JSON.stringify(r);
   assert.ok(!out.includes(KEY));
   assert.ok(!/ECONNREFUSED|fetch failed/i.test(out));
@@ -74,6 +75,7 @@ test("redirect refused maps to webhook_network_error", async () => {
   try {
     const r = await postWebhook(mock.url, KEY, { kind: "wake" });
     assert.equal(r.error, "webhook_network_error");
+    assert.equal(r.sent, "unknown");
     assert.ok(!JSON.stringify(r).includes(KEY));
   } finally {
     await mock.close();
@@ -89,6 +91,9 @@ test("timeout maps to webhook_timeout", async () => {
     assert.equal(r.ok, false);
     assert.equal(r.status, 0);
     assert.equal(r.error, "webhook_timeout");
+    // The request went out before the timeout fired, so "sent" is not knowable.
+    assert.equal(r.sent, "unknown");
+    assert.equal(mock.hits(), 1);
   } finally {
     await mock.close();
   }

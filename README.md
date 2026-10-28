@@ -78,14 +78,29 @@ Unset variables that a host passes through literally (`${GROKBOTS_WEBHOOK_URL}`)
 |---|---|---|
 | Your routine's POST URL (`GROKBOTS_WEBHOOK_URL` or roster `url`) | Only on `wake_bot` / `send_prompt` with `confirm=true` | One POST: `Content-Type: application/json`, `Authorization: Bearer <key>`, `X-Automation-Key: <key>`, 8 s timeout, no retry, no redirects |
 
-POST bodies: `{kind:"wake", reason, from, sentAt, requestId}` or `{kind:"prompt", prompt, from, replyHint?, sentAt, requestId}`. They carry no tokens. Responses are truncated to 2000 chars. Tool output redacts the URL's last path segment and never includes keys. No telemetry, no postinstall scripts, and nothing downloaded at runtime (the bootstrap script runs `npm ci` once to install the pinned dependencies from the lockfile). Errors come back as fixed codes (`webhook_key_invalid`, `webhook_timeout`, `webhook_network_error`, `webhook_http_<status>`), never raw network error text, and a key that is not printable ASCII (spaces, line breaks, control characters) is refused before anything is sent.
+POST bodies: `{kind:"wake", reason, bot, from, sentAt, requestId}` or `{kind:"prompt", prompt, bot, from, replyHint?, sentAt, requestId}`. `bot` is the roster entry name the call was sent as (since 0.1.1; older versions omit it, so treat it as optional), so one routine shared by several roster entries can tell them apart. It is the name only, never a URL, key or key source. The bodies carry no tokens. Responses are truncated to 2000 chars. Tool output redacts the URL's last path segment and never includes keys. No telemetry, and nothing downloaded at runtime (the bootstrap script runs `npm ci` once to install the pinned dependencies from the lockfile; the server itself runs from `dist/` with plain `node`).
+
+**Install scripts.** The plugin itself has no install scripts. Exactly one package in the lockfile declares one: `esbuild` (a `postinstall` that checks its platform-specific binary and, only if that optional package is missing, tries to fetch it), pulled in by `tsx`, which is only used by the `dev` and `test` scripts (it is listed under `dependencies`, but `start` runs `dist/index.js` without it). So the bootstrap `npm ci` may run esbuild's install step for that toolchain; whether it does depends on your npm version and its install-script settings (newer npm releases skip unapproved install scripts and print a warning, which is harmless here because `npm run build` uses `tsc`, not esbuild). You can check with `npm query ':attr(scripts, [postinstall]), :attr(scripts, [install]), :attr(scripts, [preinstall])'` in `mcp/grokbots`.
+
+### Errors
+
+Errors come back as fixed codes, never raw network error text. A key that is not printable ASCII (spaces, line breaks, control characters) is refused before anything is sent.
+
+| `error` | `sent` | Meaning |
+|---|---|---|
+| `webhook_key_invalid` | `false` | Key refused before the request; nothing went out |
+| `webhook_http_<status>` | `true` | The routine answered with a non-2xx status (401/403 wrong key or header, 404 wrong URL or deleted routine) |
+| `webhook_timeout` | `"unknown"` | No response within 8 s. The request may already have reached the routine |
+| `webhook_network_error` | `"unknown"` | Connection, TLS or refused-redirect failure. The request may or may not have reached the routine |
+
+Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sending again, so it doesn't run twice.
 
 **`keyEnv` / `keyFile` send that key to that bot's URL.** Each roster entry's key goes in the headers of the POST to that entry's `url` / `urlEnv`. Only point an entry at a URL you trust with that key.
 
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 23 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # 25 tests; a loopback mock stands in for the routine
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).
