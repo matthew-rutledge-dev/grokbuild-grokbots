@@ -1,5 +1,5 @@
 /** Plugin / server version. Bump with the manifests. */
-export const VERSION = "0.1.7";
+export const VERSION = "0.1.8";
 
 /** Single MCP server name. */
 export const SERVER_NAME = "grokbots";

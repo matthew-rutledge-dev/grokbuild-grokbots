@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.8
+
+- Test: aborting an `untilReply` wait over stdio must also end the in-flight bridge long-poll (the bridge sees the connection close within 3 s, no new read). It fails if only the fetch-level abort link in `call()` is dropped, which the earlier tests did not catch (44 tests).
+- README: an abort stops polling, the in-flight request and progress, but deliberately keeps the reply route (never DELETEs it), so a late reply still lands and the next `wait_reply` picks it up.
+- `grokbots-send`: the "Bot is not ready" causes are examples ("for example"), not a complete list.
+- Bump manifests, MCP package and `VERSION` to `0.1.8`.
+
 ## 0.1.7
 
 - **Waiting works like a Discord thread: no short time limit.** One `wait_reply` (or `send_prompt` `wait: true`) call is a check-in, not a time limit. With no reply yet it returns `state: "awaiting_reply"`, `done: false` (not an MCP error) with `requestId`, `elapsedSec` (since the send, from the bridge's `createdAt`), `waitingFor` ("still waiting, 12 min"), `expiresAt`, `next: {tool: "wait_reply", arguments: {requestId}}` and an instruction to post a short progress line and call again. Nothing expires before the bridge's token TTL (6 h by default from bridge 0.2.2).

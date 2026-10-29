@@ -15,7 +15,7 @@ The `grokbots` MCP server POSTs once to a Grok Bot's **webhook-triggered routine
 4. **Confirm.** Show the user the bot name and the prompt. Only after they agree, call again with `confirm: true`. One POST, 8 s timeout, no retry.
 5. **Read the result.** `ok: true` with HTTP 200 (`{success:true, runUuid}`) means the routine accepted it. Otherwise:
    - **Refused before sending** (`sent: false`, nothing went out; the result's `error` is a sentence, not a code):
-     - "Bot is not ready. Nothing sent." with a `problems` list: the bot's config failed the roster checks (URL not https, key not set, key not available from its `keyEnv` / `keyFile`, or a key that isn't printable ASCII). This is checked when the roster loads, so it shows up on the dry-run too, and `list_bots` / `check_bot` show the same `problems`. Fix the config (skill `grokbots-roster`).
+     - "Bot is not ready. Nothing sent." with a `problems` list: the bot's config failed the roster checks, for example: URL not https, key not set, key not available from its `keyEnv` / `keyFile`, or a key that isn't printable ASCII. This is checked when the roster loads, so it shows up on the dry-run too, and `list_bots` / `check_bot` show the same `problems`. Fix the config (skill `grokbots-roster`).
      - "Key not available. Nothing sent.": the key passed the roster check but was gone when the confirmed send re-read it (for example the key file was removed in between).
      - A key that changed to an invalid value in between: `errorCode: "webhook_key_invalid"` (the code is in `errorCode`; `error` holds the message).
      - Unknown bot, several bots and no `bot` given, no bots configured, or an empty or too-long prompt: `error` says which.

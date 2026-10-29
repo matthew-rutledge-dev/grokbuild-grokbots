@@ -85,7 +85,7 @@ Part of the single source above. To get the bot's answer back into Grok Build or
 - `state: "expired"` or `"cancelled"` (`done: true`): stop. The bridge reports these directly while it keeps a short tombstone (0.2.3+). After that, a 404 means `expired` if the last known `expiresAt` has passed, and `cancelled` if this process saw the route before.
 - `state: "not_found"` (`done: true`): the bridge never knew this `requestId` here. Either the id is wrong, or `GROKBOTS_BRIDGE_URL` points at the wrong path or at a proxy answering 404.
 - `state: "config_error"` (`done: true`): the bridge refused `GROKBOTS_BRIDGE_KEY` (401). Retrying won't help; fix the key and restart the host.
-- `state: "aborted"` (`done: false`): the host cancelled the call. Polling and progress stop at once, and the route stays open, so `wait_reply` can resume. Bridge unreachable is also `done: false`: try again later.
+- `state: "aborted"` (`done: false`): the host cancelled the call, or a host timeout cancelled it. Polling, the in-flight bridge request and progress all stop at once. **The reply route is deliberately kept:** an abort never DELETEs it, so a reply the bot sends later still lands on the bridge, and the next `wait_reply` with the same `requestId` picks it up. The plugin cancels a route only when its own webhook send failed. Call nothing extra to keep waiting later; the route ends on its own at `expiresAt`. Bridge unreachable is also `done: false`: try again later.
 
 Why 45 s per call: MCP hosts end a tool call on their own clock, often around 60 s and sometimes sooner. If your host allows longer calls, raise `GROKBOTS_WAIT_SEC` (max 600) or pass `timeoutSec`.
 
@@ -143,7 +143,7 @@ Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sendin
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 43 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # 44 tests; a loopback mock stands in for the routine
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).

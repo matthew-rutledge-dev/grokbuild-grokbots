@@ -285,3 +285,46 @@ test("stdio: aborting an untilReply wait stops the bridge reads at once", async 
     await new Promise<void>((r) => srv.close(() => r()));
   }
 });
+
+test("stdio: abort also ends the in-flight bridge long-poll (fetch is aborted, not left to finish)", async () => {
+  const BKEY = "placeholder-bridge-client-22222222";
+  let reads = 0;
+  let closedAt = 0;
+  const srv = http.createServer((req, res) => {
+    reads += 1;
+    // Hold the long-poll open far longer than the test: only an aborted fetch closes it early.
+    const t = setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({ ok: true, requestId: "pending-abort2", state: "awaiting_reply", createdAt: new Date().toISOString(), replies: [] }),
+      );
+    }, 20_000);
+    res.on("close", () => {
+      clearTimeout(t);
+      if (!res.writableEnded) closedAt = Date.now();
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as { port: number }).port;
+  const client = await connect({ GROKBOTS_BRIDGE_URL: `http://127.0.0.1:${port}`, GROKBOTS_BRIDGE_KEY: BKEY, GROKBOTS_WAIT_MAX_SEC: "300" });
+  try {
+    const ac = new AbortController();
+    const call = client.callTool({ name: "wait_reply", arguments: { requestId: "pending-abort2", untilReply: true, timeoutSec: 30 } }, undefined, {
+      onprogress: () => undefined,
+      signal: ac.signal,
+    });
+    // wait until the server's long-poll is open, then abort
+    for (let i = 0; i < 50 && reads === 0; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(reads, 1);
+    const abortedAt = Date.now();
+    ac.abort();
+    await assert.rejects(call);
+    for (let i = 0; i < 40 && !closedAt; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(closedAt > 0, "the bridge saw the long-poll connection closed");
+    assert.ok(closedAt - abortedAt < 3000, `closed ${closedAt - abortedAt} ms after the abort`);
+    assert.equal(reads, 1, "no new read after the abort");
+  } finally {
+    await client.close();
+    srv.closeAllConnections();
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
+});
