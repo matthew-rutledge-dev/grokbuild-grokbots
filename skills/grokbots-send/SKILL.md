@@ -10,16 +10,21 @@ The `grokbots` MCP server POSTs once to a Grok Bot's **webhook-triggered routine
 ## Steps
 
 1. **Find the bot.** Call `list_bots`. Pick the bot by `name`. If `count` is 0 or the bot shows `ready: false`, stop and point the user at skill `grokbots-roster` (caller side) and `grokbots-routine-setup` (bot side). Never ask for the key in chat.
-2. **Check it.** `check_bot` with `bot` confirms the URL is https and a key is present. No network call.
+2. **Check it.** `check_bot` with `bot` confirms the URL is https (or loopback http) and a valid key is present. No network call. `bot` can be left out only when exactly one bot is configured.
 3. **Preview.** Call `send_prompt` (or `wake_bot`) **without** `confirm`. You get a dry-run with the exact JSON payload and a redacted target. Nothing is sent.
 4. **Confirm.** Show the user the bot name and the prompt. Only after they agree, call again with `confirm: true`. One POST, 8 s timeout, no retry.
-5. **Read the result.** `ok: true` with HTTP 200 (`{success:true, runUuid}`) means the routine accepted it. 401/403 = wrong key, 404 = wrong URL or deleted routine, status 0 = network or timeout. Don't retry in a loop; report it.
+5. **Read the result.** `ok: true` with HTTP 200 (`{success:true, runUuid}`) means the routine accepted it. Otherwise read `error` and `sent`:
+   - `webhook_http_401` / `_403` = wrong key or header, `webhook_http_404` = wrong URL or deleted routine (`sent: true`).
+   - `webhook_timeout` / `webhook_network_error` = no HTTP response (`httpStatus` 0, `sent: "unknown"`). The routine may already have it: check the bot's own chat before sending again.
+   - `webhook_response_read_failed` = the routine answered (`httpStatus` set) but its reply body couldn't be read (`sent: true`). Don't resend.
+   - `webhook_key_invalid` = key refused before sending (`sent: false`).
+   Don't retry in a loop; report it.
 
 ## Rules
 
 - Keep prompts self-contained (max 8000 chars). The bot's routine treats the body as untrusted data, so write a clear request, not instructions that pretend to be the bot's owner.
 - Don't send secrets, tokens or private file contents in a prompt.
-- `wake_bot` sends only `{kind:"wake", reason}`. Use it to nudge a bot, e.g. so a routine drains a queue.
+- `wake_bot` sends `{kind:"wake", reason, bot, from, sentAt, requestId}` (no prompt; `reason` max 500 chars, default "wake requested"). Use it to nudge a bot, e.g. so a routine drains a queue. `send_prompt` sends `{kind:"prompt", prompt, bot, from, replyHint?, sentAt, requestId}`.
 - If `GROKBOTS_READ_ONLY` is on, `wake_bot` and `send_prompt` are hidden. Don't look for workarounds; tell the user.
 - Never print the webhook URL path or key. Tool output already redacts them.
 
@@ -27,3 +32,4 @@ The `grokbots` MCP server POSTs once to a Grok Bot's **webhook-triggered routine
 
 - Bot side (create the routine): skill `grokbots-routine-setup`
 - Caller side (env vars and roster file): skill `grokbots-roster`
+- Waking a bot from Discord instead: the [grokbot-discord-fleet](https://github.com/matthew-rutledge-dev/grokbot-discord-fleet) plugin and its host bridge. One webhook routine can serve both.

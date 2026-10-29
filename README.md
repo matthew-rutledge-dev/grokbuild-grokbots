@@ -59,6 +59,15 @@ Inside a Grok Bot, the useful piece is the `grokbots-routine-setup` skill. It's 
 2. **In Grok Build / Cursor:** set the plugin variables `GROKBOTS_WEBHOOK_URL` and `GROKBOTS_WEBHOOK_KEY`, or use a roster file for several bots (see `skills/grokbots-roster/SKILL.md`). Reload.
 3. Ask: "list my grok bots", then "wake example-agent". You get a dry-run first, then confirm.
 
+## Webhook and wake setup (single source)
+
+This repo is the single source for waking or prompting a Grok Bot from Grok Build, Cursor or a script. The Discord fleet plugin links here rather than repeating it.
+
+- **Where the values live.** `GROKBOTS_WEBHOOK_URL`, `GROKBOTS_WEBHOOK_KEY` and `GROKBOTS_DEFAULT_BOT` are user-level settings: the host's plugin variables, or the user's own shell environment that the host starts from. For several bots, point `GROKBOTS_ROSTER_FILE` at a JSON roster **outside any repo** (for example `~/.config/grokbots/roster.json`), with keys in 0600 key files next to it. Never put them in a project `.env`, a committed file or chat.
+- **Where the key comes from.** Copy it from the target bot's routine webhook panel (the **key** field; skill `grokbots-routine-setup` gives the deep links). The user pastes it straight into the caller's variable or key file. The bot never sees it: it only creates the routine and points at the field.
+- **Lookup order.** The env bot (`GROKBOTS_WEBHOOK_URL` + `GROKBOTS_WEBHOOK_KEY`, named `GROKBOTS_DEFAULT_BOT`, default `default`) comes first, then the roster file entries in file order. A later entry with a name already taken is ignored (reported in `errors`). Details: skill `grokbots-roster`.
+- **One webhook routine can serve both** Discord wakes and GrokBuild prompts. A bot that already has a wake routine for the Discord bridge (the [grokbot-discord-fleet](https://github.com/matthew-rutledge-dev/grokbot-discord-fleet) `discord-wake-on-sleep` skill) can reuse it here: extend its prompt to also handle `kind: "prompt"` / `kind: "wake"` bodies (see `grokbots-routine-setup`, step b), and use the same URL and key. The bridge's wake body is `{reason, heldCount, firstHeldAt}` with no `kind`, so the routine can tell them apart.
+
 ## Plugin variables
 
 | Variable | Required | Meaning |
