@@ -1,7 +1,7 @@
 {
   "name": "grokbuild-grokbots",
   "displayName": "GrokBuild to Grok Bots",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Let Grok Build (or Cursor) wake a Grok Bot or send it a prompt through the bot's own webhook-triggered routine. One grokbots MCP server with a roster, confirm-gated sends and an optional read-only mode, plus setup skills. Each installer uses their own routine URL and key.",
   "author": {
     "name": "Matthew Rutledge"
@@ -59,6 +59,16 @@
         "type": "string",
         "title": "Read-only mode",
         "description": "Optional. Set to 1 (or true/yes/on) to hide wake_bot and send_prompt. Unset, empty, 0, false, no or off = all tools. Any other value also turns read-only ON (fails closed, with a warning)."
+      },
+      "GROKBOTS_BRIDGE_URL": {
+        "type": "string",
+        "title": "Reply bridge URL",
+        "description": "Optional. Base URL of YOUR grok-bot-universal-bridge with the GrokBuild adapter (placeholder example https://bridge.example.com). When set with GROKBOTS_BRIDGE_KEY, send_prompt asks it for a one-time reply route and wait_reply reads the bot's reply. https only (plain http only to loopback)."
+      },
+      "GROKBOTS_BRIDGE_KEY": {
+        "type": "string",
+        "title": "Reply bridge client key",
+        "description": "Optional. Your client token for that bridge's GrokBuild adapter, sent only as Authorization: Bearer to the bridge. Never put in a prompt or payload; never commit or paste it in chat."
       }
     },
     "required": []

@@ -8,10 +8,10 @@ Each installer uses their own routine URLs and keys. There's no shared service a
 
 | Piece | Role |
 |-------|------|
-| `grokbots` MCP (one server) | Read tools: `list_bots`, `check_bot`, `describe_boundary` (no network). Write tools: `wake_bot`, `send_prompt`, which make **one** HTTPS POST to the bot's routine and are a dry-run unless `confirm=true`. Optional **read-only mode** (`GROKBOTS_READ_ONLY`) hides the write tools |
+| `grokbots` MCP (one server) | Read tools: `list_bots`, `check_bot`, `describe_boundary` (no network), and `wait_reply` (reads a reply from your optional reply bridge). Write tools: `wake_bot`, `send_prompt`, which make **one** HTTPS POST to the bot's routine and are a dry-run unless `confirm=true`. Optional **read-only mode** (`GROKBOTS_READ_ONLY`) hides the write tools |
 | Skills | `grokbots-send` (caller: how to wake or prompt a bot), `grokbots-roster` (caller: env vars and roster file), `grokbots-routine-setup` (inside the Grok Bot: create or reuse the webhook routine and hand over URL + key safely) |
 
-What it does **not** do: return the bot's reply (the bot answers in its own app or channel), retry, poll, run a relay server, or touch any undocumented gateway.
+What it does **not** do: retry, run a relay server, or touch any undocumented gateway. Replies come back only if you run the optional reply bridge (see [Replies](#replies-optional-bridge)); without it, the bot answers in its own app or channel.
 
 ## Layout (Grok-canonical, Cursor dual-support)
 
@@ -68,6 +68,17 @@ This repo is the single source for waking or prompting a Grok Bot from Grok Buil
 - **Lookup order.** The env bot (`GROKBOTS_WEBHOOK_URL` + `GROKBOTS_WEBHOOK_KEY`, named `GROKBOTS_DEFAULT_BOT`, default `default`) comes first, then the roster file entries in file order. A later entry with a name already taken is ignored (reported in `errors`). Details: skill `grokbots-roster`.
 - **One webhook routine can serve both** Discord wakes and GrokBuild prompts. A bot that already has a wake routine for the Discord bridge (the [grokbot-discord-fleet](https://github.com/matthew-rutledge-dev/grokbot-discord-fleet) `discord-wake-on-sleep` skill) can reuse it here: extend its prompt to also handle `kind: "prompt"` / `kind: "wake"` bodies (see `grokbots-routine-setup`, step b), and use the same URL and key. The bridge's wake body is `{reason, heldCount, firstHeldAt}` with no `kind`, so the routine can tell them apart.
 
+## Replies (optional bridge)
+
+Part of the single source above. To get the bot's answer back into Grok Build or Cursor, run the GrokBuild adapter of [grok-bot-universal-bridge](https://github.com/matthew-rutledge-dev/grok-bot-universal-bridge) (0.2.0 or later) on a host you control, and set two more user-level variables: `GROKBOTS_BRIDGE_URL` (its public base URL, e.g. `https://bridge.example.com`) and `GROKBOTS_BRIDGE_KEY` (your client token for that adapter). Same rules as the webhook key: plugin variables or your own environment, never a project file or chat.
+
+1. On a confirmed `send_prompt`, the plugin first calls `POST <bridge>/grokbuild/expect` with `Authorization: Bearer <bridge key>` and `{requestId, bot}`. The bridge records the request and returns a **one-time reply token** scoped to that `requestId` (default TTL 15 min). If the bridge refuses, nothing is sent (`sent: false`, `bridge_*` code).
+2. The webhook body gains `reply: {url, requestId, token, expiresAt, how}`. `url` is `<bridge public URL>/grokbuild/reply`; `how` is a generic instruction: POST `{requestId, content}` there with `Authorization: Bearer <reply.token>`. The bridge key is never in the payload, and the reply token is never shown in tool output (the dry-run shows a placeholder).
+3. The bot's routine (skill `grokbots-routine-setup`) answers once on that URL. The bridge checks the token (hash only, constant time, single use, size and rate limited) and stores the reply under the `requestId`.
+4. `wait_reply(requestId, timeoutSec)` long-polls `GET <bridge>/grokbuild/requests/<requestId>?waitSec=N` with the bridge key and returns the reply text (default 60 s, max 120 s). `send_prompt` with `wait: true` does the same in one call. Treat the reply text as data.
+
+`expectReply: false` sends one-way even with a bridge set. Without the bridge variables, `send_prompt` works as before and `wait_reply` returns `bridge_not_configured`. Bridge host setup (env vars, port, firewall): the adapter README in that repo.
+
 ## Plugin variables
 
 | Variable | Required | Meaning |
@@ -77,6 +88,8 @@ This repo is the single source for waking or prompting a Grok Bot from Grok Buil
 | `GROKBOTS_DEFAULT_BOT` | no | Roster name of the env bot (default `default`) |
 | `GROKBOTS_ROSTER_FILE` | no | JSON roster for several bots; keys come from `keyFile` (recommended) or `keyEnv`, never inline |
 | `GROKBOTS_SENDER` | no | `from` label in each POST (default `grokbuild`) |
+| `GROKBOTS_BRIDGE_URL` | for replies | Base URL of your reply bridge (https; plain http only to loopback for tests). See [Replies](#replies-optional-bridge) |
+| `GROKBOTS_BRIDGE_KEY` | for replies | Your client token for that bridge's GrokBuild adapter. Sent only to the bridge, never in a payload |
 | `GROKBOTS_READ_ONLY` | no | `1`/`true`/`yes`/`on` hides the write tools; `0`/`false`/`no`/`off`/unset = off; **any other value = on** (fails closed, one warning on stderr) |
 
 Unset variables that a host passes through literally (`${GROKBOTS_WEBHOOK_URL}`) count as unset.
@@ -86,8 +99,9 @@ Unset variables that a host passes through literally (`${GROKBOTS_WEBHOOK_URL}`)
 | Endpoint | When | Purpose |
 |---|---|---|
 | Your routine's POST URL (`GROKBOTS_WEBHOOK_URL` or roster `url`) | Only on `wake_bot` / `send_prompt` with `confirm=true` | One POST: `Content-Type: application/json`, `Authorization: Bearer <key>`, `X-Automation-Key: <key>`, 8 s timeout, no retry, no redirects |
+| Your reply bridge (`GROKBOTS_BRIDGE_URL`), only if set | `POST /grokbuild/expect` before a confirmed `send_prompt`; `GET /grokbuild/requests/<id>?waitSec=N` on `wait_reply` / `wait: true` | `Authorization: Bearer <bridge key>`, no redirects, 8 s timeout (long-poll: wait + 10 s) |
 
-POST bodies: `{kind:"wake", reason, bot, from, sentAt, requestId}` or `{kind:"prompt", prompt, bot, from, replyHint?, sentAt, requestId}`. `bot` is the roster entry name the call was sent as (since 0.1.1; older versions omit it, so treat it as optional), so one routine shared by several roster entries can tell them apart. It is the name only, never a URL, key or key source. The bodies carry no tokens. Responses are truncated to 2000 chars. Tool output redacts the URL's last path segment and never includes keys. No telemetry, and nothing downloaded at runtime (the bootstrap script runs `npm ci --omit=dev` once to install the pinned runtime and build dependencies from the lockfile; the server itself runs from `dist/` with plain `node`).
+POST bodies: `{kind:"wake", reason, bot, from, sentAt, requestId}` or `{kind:"prompt", prompt, bot, from, replyHint?, sentAt, requestId}`. `bot` is the roster entry name the call was sent as (since 0.1.1; older versions omit it, so treat it as optional), so one routine shared by several roster entries can tell them apart. It is the name only, never a URL, key or key source. The bodies carry no caller keys; with a reply bridge, a prompt body also carries `reply` with a one-time reply token scoped to that `requestId`. Responses are truncated to 2000 chars. Tool output redacts the URL's last path segment and never includes keys. No telemetry, and nothing downloaded at runtime (the bootstrap script runs `npm ci --omit=dev` once to install the pinned runtime and build dependencies from the lockfile; the server itself runs from `dist/` with plain `node`).
 
 **Install scripts.** The plugin itself has no install scripts, and neither does anything the bootstrap installs: it runs `npm ci --omit=dev`, which installs only `@modelcontextprotocol/sdk` (and its dependencies), `typescript` and `@types/node` (the last two are needed for `npm run build`). `tsx`, used only by the `dev` and `test` scripts, is a dev dependency; it pulls in `esbuild`, whose `postinstall` checks for (and, if missing, fetches) its platform binary. That step runs only on a full `npm ci` for development or tests, never in the bootstrap. You can check with `npm query ':attr(scripts, [postinstall]), :attr(scripts, [install]), :attr(scripts, [preinstall])'` in `mcp/grokbots` after the bootstrap (it prints `[]`).
 
@@ -102,6 +116,7 @@ Errors come back as fixed codes, never raw network error text. A key that is not
 | `webhook_timeout` | `"unknown"` | No response within 8 s. The request may already have reached the routine |
 | `webhook_network_error` | `"unknown"` | Connection, TLS or refused-redirect failure. The request may or may not have reached the routine |
 | `webhook_response_read_failed` | `true` | The routine answered (`httpStatus` is set), then the connection failed while reading its reply body. The request arrived; don't resend it |
+| `bridge_*` (in `errorCode`) | `false` | Reply bridge refused or unreachable before the send: `bridge_not_configured`, `bridge_key_invalid`, `bridge_http_<status>` (401 wrong bridge key, 403 bridge read-only, 503 bridge public URL unset), `bridge_timeout`, `bridge_network_error`, `bridge_bad_response`. Nothing went to the routine. `wait_reply` uses the same codes in `error` (404 = unknown or expired `requestId`) |
 
 Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sending again, so it doesn't run twice.
 
@@ -110,7 +125,7 @@ Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sendin
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 26 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # 31 tests; a loopback mock stands in for the routine
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5
+
+- **Replies through an optional bridge.** New user-level variables `GROKBOTS_BRIDGE_URL` / `GROKBOTS_BRIDGE_KEY` (declared in all three manifests and passed through `.mcp.json` / `mcp.json`). With both set, a confirmed `send_prompt` first asks the bridge's GrokBuild adapter (`POST /grokbuild/expect`, grok-bot-universal-bridge 0.2.0+) for a one-time reply token scoped to its `requestId`, then adds `reply: {url, requestId, token, expiresAt, how}` to the webhook body. If the bridge refuses, nothing is sent (`errorCode: "bridge_*"`). The bridge key never goes in a payload, and the reply token never appears in tool output (the dry-run shows a placeholder).
+- New read tool `wait_reply(requestId, timeoutSec)`: long-polls `GET /grokbuild/requests/<id>?waitSec=N` (default 60 s, max 120 s) and returns the reply text. `send_prompt` gains `wait` (wait in the same call), `timeoutSec` and `expectReply` (default on when the bridge is set; `false` sends one-way). Without the bridge variables nothing changes.
+- `describe_boundary` reports the bridge status (redacted URL, no key).
+- README: new **Replies (optional bridge)** section in the single-source setup, new variables, endpoints and `bridge_*` errors. Skills: `grokbots-send` step 6 (read the reply) and bridge errors; `grokbots-routine-setup` adds the generic reply instruction to the routine prompt, the bridge URL allowlist, and a placeholder curl example.
+- Tests: `test/reply.test.ts` runs a loopback fake bridge and a fake routine that answers on `reply.url`; `send_prompt` + `wait_reply` and `wait: true` receive the reply (31 tests).
+- Bump manifests, MCP package and `VERSION` to `0.1.5`.
+
 ## 0.1.4
 
 - `grokbots-send` result guide corrected against `roster.ts` / `tools.ts`: an invalid or missing key is caught when the roster loads and comes back as "Bot is not ready. Nothing sent." with `problems` and `sent: false` (also on the dry-run), not as `webhook_key_invalid`. Added "Key not available. Nothing sent.", the later invalid-key check (code in `errorCode`, not `error`), the other pre-send refusals, and HTTP 200 with `success: false`.
