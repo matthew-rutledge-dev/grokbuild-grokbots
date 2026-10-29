@@ -38,13 +38,15 @@ export function createServer(readOnlyState: ReadOnlyResolution): Server {
         token === undefined
           ? undefined
           : async (n: number, message: string) => {
+              if (extra.signal.aborted) return;
               try {
                 await extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: n, message } });
               } catch {
                 /* host went away; the wait ends on its own */
               }
             };
-      const result = await handleTool(name, args, { readOnly: readOnlyState, progress });
+      // extra.signal aborts when the host cancels the call (or the transport closes): waits stop at once.
+      const result = await handleTool(name, args, { readOnly: readOnlyState, progress, signal: extra.signal });
       return result ?? jsonResult({ error: `Unknown tool: ${name}` }, true);
     } catch {
       // Fixed text only: a raw error message could quote config or a key.

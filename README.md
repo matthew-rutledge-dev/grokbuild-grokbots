@@ -82,11 +82,14 @@ Part of the single source above. To get the bot's answer back into Grok Build or
 
 - `state: "replied"` (`done: true`): `replies[]` has the answer.
 - `state: "awaiting_reply"` (`done: false`, not an error): no reply yet. The result carries `requestId`, `elapsedSec` (since the send), `waitingFor` (`"still waiting, 12 min"`), `expiresAt`, `next: {tool: "wait_reply", arguments: {requestId}}` and an `instruction`. The host agent posts a short progress line to the user and calls `wait_reply` again.
-- `state: "expired"` or `"cancelled"` (`done: true`): stop.
+- `state: "expired"` or `"cancelled"` (`done: true`): stop. The bridge reports these directly while it keeps a short tombstone (0.2.3+). After that, a 404 means `expired` if the last known `expiresAt` has passed, and `cancelled` if this process saw the route before.
+- `state: "not_found"` (`done: true`): the bridge never knew this `requestId` here. Either the id is wrong, or `GROKBOTS_BRIDGE_URL` points at the wrong path or at a proxy answering 404.
+- `state: "config_error"` (`done: true`): the bridge refused `GROKBOTS_BRIDGE_KEY` (401). Retrying won't help; fix the key and restart the host.
+- `state: "aborted"` (`done: false`): the host cancelled the call. Polling and progress stop at once, and the route stays open, so `wait_reply` can resume. Bridge unreachable is also `done: false`: try again later.
 
 Why 45 s per call: MCP hosts end a tool call on their own clock, often around 60 s and sometimes sooner. If your host allows longer calls, raise `GROKBOTS_WAIT_SEC` (max 600) or pass `timeoutSec`.
 
-**`untilReply: true`** (on `wait_reply` or `send_prompt` with `wait: true`) keeps waiting inside one call, but only as long as is safe. If the host asked for progress (an MCP `progressToken`), the plugin sends a `notifications/progress` update ("still waiting, N min") after every long-poll, at most every 25 s, and keeps going up to `GROKBOTS_WAIT_MAX_SEC` (default 300 s, max 3600). Hosts that reset their timeout on progress then never cut it off. Without a `progressToken`, it waits one check-in only and says so (`untilReply: "limited: …"`). Either way, an `awaiting_reply` result just means: call again. `GROKBOTS_BRIDGE_URL` may include a path prefix (`https://bridge.example.com/base`); bridge paths are joined onto it.
+**`untilReply: true`** (on `wait_reply` or `send_prompt` with `wait: true`) keeps waiting inside one call, but only as long as is safe. If the host asked for progress (an MCP `progressToken`), the plugin sends a `notifications/progress` update ("still waiting, N min") at most once every 25 s. It stays throttled even when the bridge answers at once, which happens when it is busy (`maxLongPolls` reached) or has long-polling off; reads then come about every 2 s. The plugin keeps going up to `GROKBOTS_WAIT_MAX_SEC` (default 300 s, max 3600). Hosts that reset their timeout on progress then never cut it off. Without a `progressToken`, it waits one check-in only and says so (`untilReply: "limited: …"`). Either way, an `awaiting_reply` result just means: call again. `GROKBOTS_BRIDGE_URL` may include a path prefix (`https://bridge.example.com/base`); bridge paths are joined onto it.
 
 **The reply token is visible in the bot's routine run history**, because it is part of the webhook body the routine receives. That is acceptable: it works only for one reply to that one `requestId`, through `/grokbuild/reply`, until it expires (the bridge's `replyTokenTtlSec`, 6 h by default), and it grants no other access. The bridge key never leaves your computer except to the bridge.
 
@@ -140,7 +143,7 @@ Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sendin
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 39 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # 43 tests; a loopback mock stands in for the routine
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).

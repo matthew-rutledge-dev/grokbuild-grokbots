@@ -7,7 +7,10 @@
 - New `untilReply: true`: keeps waiting inside one call while the host takes MCP progress notifications (`progressToken`), sending one per long-poll (at most every 25 s), up to `GROKBOTS_WAIT_MAX_SEC` (default 300 s, max 3600). Without a `progressToken` it waits one check-in and says so.
 - New optional variables `GROKBOTS_WAIT_SEC` (check-in interval, default 45, 5-600) and `GROKBOTS_WAIT_MAX_SEC`, declared in all manifests and passed through. Per-call `timeoutSec` max raised from 120 to 600 for hosts that allow long calls.
 - Docs: README replies section (check-ins, states, untilReply, new variables, 6 h TTL); `grokbots-send` step 6: "keep calling wait_reply until replied/expired/cancelled; post a short progress note to the user each check"; `grokbots-routine-setup`: token lives until the bridge TTL, take as long as needed.
-- Tests: heartbeat shape and a late reply, `cancelled` on 404, `untilReply` with and without progress, MCP progress over stdio, env parsing and labels, and the missing case: no cancel when the webhook connection dies after the POST (`sent: "unknown"`) (39 tests).
+- Tests: heartbeat shape and a late reply, `cancelled` on 404, `untilReply` with and without progress, MCP progress over stdio, env parsing and labels, and the missing case: no cancel when the webhook connection dies after the POST (`sent: "unknown"`) (43 tests).
+- Cancelling a wait stops it: the MCP request's abort signal is passed through `handleTool` → `runWait` → `waitReply` → `fetch`, so polling, the 2 s sleep and progress stop at once (`state: "aborted"`, route kept so `wait_reply` can resume).
+- Progress is throttled to at most once per ~25 s, also when the bridge answers at once (busy or long-poll off).
+- A bridge 404 is no longer always `cancelled`: `expired` when the last known `expiresAt` has passed, `cancelled` when the route was seen before, `not_found` with a `GROKBOTS_BRIDGE_URL` hint otherwise. Bridge tombstone states (`expired` / `cancelled`, 0.2.3+) end the wait directly. A 401 is final: `config_error` with a `GROKBOTS_BRIDGE_KEY` hint.
 - Bump manifests, MCP package and `VERSION` to `0.1.7`.
 
 ## 0.1.6
