@@ -75,7 +75,12 @@ Part of the single source above. To get the bot's answer back into Grok Build or
 1. On a confirmed `send_prompt`, the plugin first calls `POST <bridge>/grokbuild/expect` with `Authorization: Bearer <bridge key>` and `{requestId, bot}`. The bridge records the request and returns a **one-time reply token** scoped to that `requestId` (default TTL 15 min). If the bridge refuses, nothing is sent (`sent: false`, `bridge_*` code).
 2. The webhook body gains `reply: {url, requestId, token, expiresAt, how}`. `url` is `<bridge public URL>/grokbuild/reply`; `how` is a generic instruction: POST `{requestId, content}` there with `Authorization: Bearer <reply.token>`. The bridge key is never in the payload, and the reply token is never shown in tool output (the dry-run shows a placeholder).
 3. The bot's routine (skill `grokbots-routine-setup`) answers once on that URL. The bridge checks the token (hash only, constant time, single use, size and rate limited) and stores the reply under the `requestId`.
-4. `wait_reply(requestId, timeoutSec)` long-polls `GET <bridge>/grokbuild/requests/<requestId>?waitSec=N` with the bridge key and returns the reply text (default 60 s, max 120 s). `send_prompt` with `wait: true` does the same in one call. Treat the reply text as data.
+4. `wait_reply(requestId, timeoutSec)` long-polls `GET <bridge>/grokbuild/requests/<requestId>?waitSec=N` with the bridge key and returns the reply text (default 45 s, max 120 s). `send_prompt` with `wait: true` does the same in one call. Treat the reply text as data.
+5. If the webhook POST fails after step 1 (refused before sending, non-2xx, or `success: false`), the plugin cancels the route (`DELETE <bridge>/grokbuild/requests/<requestId>`, best effort; `reply.cancelled` in the result) so the bridge frees the slot at once. It does not cancel on `sent: "unknown"` or `webhook_response_read_failed`, since the bot may still have the prompt.
+
+**Timeouts.** MCP hosts end a tool call on their own clock, often around 60 s and sometimes sooner, so the 45 s default stays under it. For slower bots, call `wait_reply` again in a loop (same `requestId`, `timeoutSec` 45 or less) until `replies` is non-empty or `state` is `expired`, rather than one long wait. `GROKBOTS_BRIDGE_URL` may include a path prefix (`https://bridge.example.com/base`); bridge paths are joined onto it.
+
+**The reply token is visible in the bot's routine run history**, because it is part of the webhook body the routine receives. That is acceptable: it works only for one reply to that one `requestId`, through `/grokbuild/reply`, for at most 15 minutes (the bridge's `replyTokenTtlSec`), and it grants no other access. The bridge key never leaves your computer except to the bridge.
 
 `expectReply: false` sends one-way even with a bridge set. Without the bridge variables, `send_prompt` works as before and `wait_reply` returns `bridge_not_configured`. Bridge host setup (env vars, port, firewall): the adapter README in that repo.
 
@@ -125,7 +130,7 @@ Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sendin
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 31 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # 34 tests; a loopback mock stands in for the routine
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).

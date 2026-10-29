@@ -23,7 +23,7 @@ List this bot's routines. If a webhook-triggered routine already exists for this
 
 When reusing a Discord wake routine, append to its prompt: "If the body has a `kind` field, it came from Grok Build: handle it as described here. If it has no `kind` (`reason`, `heldCount`, `firstHeldAt`), it is a Discord bridge wake: do the existing wake step and end quietly."
 
-Replace `<YOUR_BRIDGE_BASE_URL>` with the public URL of the user's own reply bridge (the same value as the caller's `GROKBOTS_BRIDGE_URL`, e.g. `https://bridge.example.com`). That fixed prefix is the allowlist: a payload pointing anywhere else gets no reply. Leave the reply sentence out if the user runs no bridge. The reply token in each payload works for that one `requestId` only, once, for about 15 minutes, so the routine needs no stored secret. A reply POST from the bot's computer looks like this (placeholders):
+Replace `<YOUR_BRIDGE_BASE_URL>` with the public URL of the user's own reply bridge (the same value as the caller's `GROKBOTS_BRIDGE_URL`, e.g. `https://bridge.example.com`). That fixed prefix is the allowlist: a payload pointing anywhere else gets no reply. Leave the reply sentence out if the user runs no bridge. The reply token in each payload works for that one `requestId` only, once, for about 15 minutes, so the routine needs no stored secret. It does show up in this routine's run history (it is part of the webhook body); that is acceptable because it is single-use and expires. A reply POST from the bot's computer looks like this (placeholders):
 
 ```sh
 curl -sS -X POST "$REPLY_URL" -H "Authorization: Bearer $REPLY_TOKEN" -H "Content-Type: application/json" \
