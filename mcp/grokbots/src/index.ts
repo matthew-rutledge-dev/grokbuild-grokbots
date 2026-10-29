@@ -22,7 +22,7 @@ export function createServer(readOnlyState: ReadOnlyResolution): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listTools(readOnly) }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     if (readOnly && isWriteTool(name)) {
@@ -32,7 +32,19 @@ export function createServer(readOnlyState: ReadOnlyResolution): Server {
       );
     }
     try {
-      const result = await handleTool(name, args, { readOnly: readOnlyState });
+      // Progress updates only when the host asked for them; a failed notification never fails the call.
+      const token = request.params._meta?.progressToken;
+      const progress =
+        token === undefined
+          ? undefined
+          : async (n: number, message: string) => {
+              try {
+                await extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: n, message } });
+              } catch {
+                /* host went away; the wait ends on its own */
+              }
+            };
+      const result = await handleTool(name, args, { readOnly: readOnlyState, progress });
       return result ?? jsonResult({ error: `Unknown tool: ${name}` }, true);
     } catch {
       // Fixed text only: a raw error message could quote config or a key.

@@ -40,7 +40,7 @@ async function mockRoutine(): Promise<{ url: string; hits: Hit[]; close: () => P
 async function connect(extraEnv: Record<string, string>) {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (typeof v === "string" && !k.startsWith("GROKBOTS_")) env[k] = v;
-  for (const k of ["GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_READ_ONLY", "GROKBOTS_SENDER", "GROKBOTS_DEFAULT_BOT", "GROKBOTS_BRIDGE_URL", "GROKBOTS_BRIDGE_KEY"]) {
+  for (const k of ["GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_READ_ONLY", "GROKBOTS_SENDER", "GROKBOTS_DEFAULT_BOT", "GROKBOTS_BRIDGE_URL", "GROKBOTS_BRIDGE_KEY", "GROKBOTS_WAIT_SEC", "GROKBOTS_WAIT_MAX_SEC"]) {
     env[k] = "${" + k + "}";
   }
   Object.assign(env, extraEnv);
@@ -213,5 +213,39 @@ test("stdio: GROKBOTS_READ_ONLY=enabled hides and refuses writes with one warnin
   } finally {
     await client.close();
     await mock.close();
+  }
+});
+
+test("stdio: wait_reply untilReply sends MCP progress notifications when the host asks (progressToken)", async () => {
+  const BKEY = "placeholder-bridge-client-22222222";
+  let reads = 0;
+  const srv = http.createServer((req, res) => {
+    const ok = req.headers.authorization === `Bearer ${BKEY}`;
+    if (!ok) return void res.writeHead(401, { "content-type": "application/json" }).end('{"ok":false}');
+    reads += 1;
+    const created = new Date(Date.now() - 125_000).toISOString();
+    const replied = reads >= 3;
+    setTimeout(() => {
+      res.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({ ok: true, requestId: "pending-stdio1", state: replied ? "replied" : "awaiting_reply", createdAt: created, replies: replied ? [{ content: "pong", at: created }] : [] }),
+      );
+    }, 200);
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const port = (srv.address() as { port: number }).port;
+  const client = await connect({ GROKBOTS_BRIDGE_URL: `http://127.0.0.1:${port}`, GROKBOTS_BRIDGE_KEY: BKEY, GROKBOTS_WAIT_MAX_SEC: "30" });
+  try {
+    const progress: { progress: number; message?: string }[] = [];
+    const res = await client.callTool({ name: "wait_reply", arguments: { requestId: "pending-stdio1", untilReply: true, timeoutSec: 1 } }, undefined, {
+      onprogress: (p) => void progress.push(p),
+      resetTimeoutOnProgress: true,
+    });
+    const body = json(res);
+    assert.deepEqual([body.state, (body.replies as Array<{ content: string }>)[0].content], ["replied", "pong"]);
+    assert.ok(progress.length >= 2, `progress notifications (${progress.length})`);
+    assert.match(String(progress[0].message), /^still waiting, 2 min for pending-stdio1$/);
+  } finally {
+    await client.close();
+    await new Promise<void>((r) => srv.close(() => r()));
   }
 });

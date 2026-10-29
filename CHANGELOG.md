@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.7
+
+- **Waiting works like a Discord thread: no short time limit.** One `wait_reply` (or `send_prompt` `wait: true`) call is a check-in, not a time limit. With no reply yet it returns `state: "awaiting_reply"`, `done: false` (not an MCP error) with `requestId`, `elapsedSec` (since the send, from the bridge's `createdAt`), `waitingFor` ("still waiting, 12 min"), `expiresAt`, `next: {tool: "wait_reply", arguments: {requestId}}` and an instruction to post a short progress line and call again. Nothing expires before the bridge's token TTL (6 h by default from bridge 0.2.2).
+- Results now carry `done` and a final `state`: `replied`, `expired`, or `cancelled` (bridge 404: cancelled, swept or another client's id). Bridge unreachable stays `done: false`.
+- New `untilReply: true`: keeps waiting inside one call while the host takes MCP progress notifications (`progressToken`), sending one per long-poll (at most every 25 s), up to `GROKBOTS_WAIT_MAX_SEC` (default 300 s, max 3600). Without a `progressToken` it waits one check-in and says so.
+- New optional variables `GROKBOTS_WAIT_SEC` (check-in interval, default 45, 5-600) and `GROKBOTS_WAIT_MAX_SEC`, declared in all manifests and passed through. Per-call `timeoutSec` max raised from 120 to 600 for hosts that allow long calls.
+- Docs: README replies section (check-ins, states, untilReply, new variables, 6 h TTL); `grokbots-send` step 6: "keep calling wait_reply until replied/expired/cancelled; post a short progress note to the user each check"; `grokbots-routine-setup`: token lives until the bridge TTL, take as long as needed.
+- Tests: heartbeat shape and a late reply, `cancelled` on 404, `untilReply` with and without progress, MCP progress over stdio, env parsing and labels, and the missing case: no cancel when the webhook connection dies after the POST (`sent: "unknown"`) (39 tests).
+- Bump manifests, MCP package and `VERSION` to `0.1.7`.
+
 ## 0.1.6
 
 - Bridge URLs are joined with `URL`, so a `GROKBOTS_BRIDGE_URL` with a path prefix (`https://bridge.example.com/base`) works for every call, and the dry-run `reply.url` preview is built correctly (base path redacted like other URLs).
