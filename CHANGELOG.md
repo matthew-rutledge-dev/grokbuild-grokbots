@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- `grokbots-send` result guide corrected against `roster.ts` / `tools.ts`: an invalid or missing key is caught when the roster loads and comes back as "Bot is not ready. Nothing sent." with `problems` and `sent: false` (also on the dry-run), not as `webhook_key_invalid`. Added "Key not available. Nothing sent.", the later invalid-key check (code in `errorCode`, not `error`), the other pre-send refusals, and HTTP 200 with `success: false`.
+- `wake_bot` / `send_prompt` tool descriptions show the full payload (`from`, `sentAt`, `requestId`, and `replyHint?` for prompts). No behavior change.
+- Bump manifests, MCP package and `VERSION` to `0.1.4`.
+
 ## 0.1.3
 
 Docs and skills only; no code changes.
