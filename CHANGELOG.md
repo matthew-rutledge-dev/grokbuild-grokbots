@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3
+
+Docs and skills only; no code changes.
+
+- README: new **Webhook and wake setup (single source)** section. This repo is the one place for caller-side webhook setup: user-level `GROKBOTS_WEBHOOK_URL` / `GROKBOTS_WEBHOOK_KEY` / `GROKBOTS_DEFAULT_BOT` or a roster file outside any repo, the key copied from the bot's routine webhook panel (the bot never sees it), lookup order, and that one webhook routine can serve both Discord wakes and GrokBuild prompts (cross-link to grokbot-discord-fleet).
+- `grokbots-roster` checked against `roster.ts` / `tools.ts`: added lookup order (env bot first, then file order; later duplicate names ignored), `url` over `urlEnv` and `keyEnv` over `keyFile` precedence, `~/` expansion and the relative-path caveat, name rules (lowercased, max 63 chars), the `{"bots": [...]}` shape, the undeclared `GROKBOTS_DEFAULT_BOT_DESCRIPTION`, and that the roster file is re-read on every call (env changes need a restart; it used to say any change needs a reload).
+- `grokbots-send`: `wake_bot` payload corrected (it said only `{kind, reason}`; it also sends `bot`, `from`, `sentAt`, `requestId`); result codes updated to the 0.1.1/0.1.2 `error` / `sent` values (it said "status 0 = network or timeout").
+- `grokbots-routine-setup`: exact headers (incl. `Content-Type` and User-Agent) and body fields; how to reuse a Discord wake-on-sleep routine for GrokBuild prompts (tell bodies apart by `kind`).
+- Bump manifests, MCP package and `VERSION` to `0.1.3`.
+
 ## 0.1.2
 
 - New error code `webhook_response_read_failed` (`sent: true`, `httpStatus` kept) when the routine answers but reading its reply body fails. It used to return `webhook_timeout` / `webhook_network_error` with `sent: true`, which contradicted the README table where those codes mean "no response" (`sent: "unknown"`). Test added; README error table and the tool's not-accepted note updated.
