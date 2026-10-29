@@ -18,7 +18,8 @@ export const BRIDGE_KEY_ENV = "GROKBOTS_BRIDGE_KEY";
 /** Longest single long-poll asked of the bridge (its maxWaitSec default is 25). */
 export const POLL_SEC = 25;
 export const MAX_WAIT_SEC = 120;
-export const DEFAULT_WAIT_SEC = 60;
+/** Fits under common MCP tool-call timeouts (often about 60 s); hosts may cut a call sooner. */
+export const DEFAULT_WAIT_SEC = 45;
 
 export type BridgeConfig = { url?: string; key?: string; problems: string[]; configured: boolean };
 
@@ -45,15 +46,34 @@ export function publicBridge(b: BridgeConfig) {
   return { configured: b.configured, target: redactUrl(b.url), ready: b.configured && b.problems.length === 0, problems: b.problems };
 }
 
+/** Join a bridge path onto the base URL, keeping any path prefix (https://bridge.example.com/base + grokbuild/x). */
+export function bridgeUrl(base: string, path: string): string {
+  return new URL(path.replace(/^\/+/, ""), base.endsWith("/") ? base : `${base}/`).toString();
+}
+
+/** Where the bridge's reply route is expected, for the dry-run preview only (base path redacted like redactUrl). */
+export function replyUrlPreview(b: BridgeConfig): string | undefined {
+  if (!b.url) return undefined;
+  try {
+    const u = new URL(bridgeUrl(b.url, "grokbuild/reply"));
+    const segs = u.pathname.split("/").filter(Boolean);
+    const prefix = segs.slice(0, -2);
+    const shown = prefix.length ? prefix.slice(0, -1).concat("…") : [];
+    return `${u.protocol}//${u.host}/${[...shown, "grokbuild", "reply"].join("/")}`;
+  } catch {
+    return undefined;
+  }
+}
+
 type CallResult = { ok: true; status: number; body: Record<string, unknown> } | { ok: false; status: number; error: BridgeErrorCode; detail?: string };
 
-async function call(b: BridgeConfig, method: "GET" | "POST", path: string, body: unknown, timeoutMs: number): Promise<CallResult> {
+async function call(b: BridgeConfig, method: "GET" | "POST" | "DELETE", path: string, body: unknown, timeoutMs: number): Promise<CallResult> {
   if (!b.configured) return { ok: false, status: 0, error: "bridge_not_configured" };
   if (b.problems.length) return { ok: false, status: 0, error: b.problems.some((p) => p.startsWith(BRIDGE_KEY_ENV)) ? "bridge_key_invalid" : "bridge_not_configured" };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(`${b.url}${path}`, {
+    const res = await fetch(bridgeUrl(b.url as string, path), {
       method,
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${b.key}`, "User-Agent": USER_AGENT },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -94,6 +114,12 @@ export async function expectReply(
     return { ok: false, status: r.status, error: "bridge_bad_response" };
   }
   return { ok: true, route: { url: replyUrl, requestId, token: replyToken, expiresAt } };
+}
+
+/** Best effort: cancel an open reply route (e.g. the webhook POST failed), so the bridge frees its slot now. */
+export async function cancelReply(b: BridgeConfig, requestId: string): Promise<boolean> {
+  const r = await call(b, "DELETE", `/grokbuild/requests/${encodeURIComponent(requestId)}`, undefined, 5000);
+  return r.ok;
 }
 
 export type Reply = { content: string; at?: string };

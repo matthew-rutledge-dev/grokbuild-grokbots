@@ -10,7 +10,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, test } from "node:test";
 import { REPLY_HOW, handleTool } from "../src/tools.js";
-import { loadBridge, waitReply } from "../src/bridge.js";
+import { DEFAULT_WAIT_SEC, bridgeUrl, loadBridge, replyUrlPreview, waitReply } from "../src/bridge.js";
 
 const ROUTINE_KEY = "placeholder-key-11111111";
 const BRIDGE_KEY = "placeholder-bridge-client-22222222";
@@ -30,22 +30,26 @@ function readJson(req: http.IncomingMessage): Promise<any> {
   });
 }
 
-async function fakeBridge(opts: { expectStatus?: number } = {}) {
+async function fakeBridge(opts: { expectStatus?: number; prefix?: string } = {}) {
   const recs = new Map<string, Rec>();
-  const seen: { path: string; auth?: string; body?: any }[] = [];
+  const seen: { method?: string; path: string; auth?: string; body?: any }[] = [];
   let base = "";
   const srv = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (opts.prefix) {
+      if (!url.pathname.startsWith(`${opts.prefix}/`)) return res.writeHead(404).end("{}");
+      url.pathname = url.pathname.slice(opts.prefix.length);
+    }
     const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     const body = req.method === "POST" ? await readJson(req) : undefined;
-    seen.push({ path: url.pathname, auth: req.headers.authorization, body });
+    seen.push({ method: req.method, path: url.pathname, auth: req.headers.authorization, body });
     const client = req.headers.authorization === `Bearer ${BRIDGE_KEY}`;
     if (url.pathname === "/grokbuild/expect") {
       if (!client) return send(401, { ok: false, error: "unauthorized" });
       if (opts.expectStatus) return send(opts.expectStatus, { ok: false, error: "read_only" });
       const token = crypto.randomBytes(32).toString("base64url");
       recs.set(body.requestId, { token, expires: Date.now() + 60_000, replies: [], waiters: [] });
-      return send(201, { ok: true, requestId: body.requestId, replyUrl: `${base}/grokbuild/reply`, replyToken: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      return send(201, { ok: true, requestId: body.requestId, replyUrl: `${base}${opts.prefix ?? ""}/grokbuild/reply`, replyToken: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
     }
     if (url.pathname === "/grokbuild/reply") {
       const r = recs.get(body?.requestId);
@@ -60,6 +64,11 @@ async function fakeBridge(opts: { expectStatus?: number } = {}) {
       if (!client) return send(401, { ok: false, error: "unauthorized" });
       const r = recs.get(m[1]);
       if (!r) return send(404, { ok: false, error: "not_found" });
+      if (req.method === "DELETE") {
+        recs.delete(m[1]);
+        for (const w of r.waiters.splice(0)) w();
+        return send(200, { ok: true, requestId: m[1], cancelled: true });
+      }
       const wait = Math.min(Number(url.searchParams.get("waitSec") ?? 0), 25);
       if (!r.replies.length && wait > 0) await new Promise<void>((done) => { r.waiters.push(done); setTimeout(done, wait * 1000); });
       return send(200, { ok: true, requestId: m[1], state: r.replies.length ? "replied" : "awaiting_reply", replies: r.replies });
@@ -71,12 +80,12 @@ async function fakeBridge(opts: { expectStatus?: number } = {}) {
 }
 
 /** The webhook routine + woken bot: 200 to the webhook, then (optionally) a reply on reply.url. */
-async function fakeRoutine(answer: string | undefined, delayMs = 150) {
+async function fakeRoutine(answer: string | undefined, delayMs = 150, status = 200, success = true) {
   const hits: any[] = [];
   const srv = http.createServer(async (req, res) => {
     const body = await readJson(req);
     hits.push({ headers: req.headers, body });
-    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ success: true, runUuid: "00000000-0000-0000-0000-000000000000" }));
+    res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ success, runUuid: "00000000-0000-0000-0000-000000000000" }));
     const reply = body.reply;
     if (answer && reply) {
       setTimeout(() => {
@@ -221,4 +230,67 @@ test("wait_reply: timeout with no reply, unknown id 404, unreachable bridge, bad
   assert.deepEqual(loadBridge({ GROKBOTS_BRIDGE_URL: "http://bridge.example.com", GROKBOTS_BRIDGE_KEY: BRIDGE_KEY }).problems, ["GROKBOTS_BRIDGE_URL must use https (plain http only allowed for loopback)"]);
   assert.deepEqual(loadBridge({ GROKBOTS_BRIDGE_URL: "https://bridge.example.com" }).problems, ["GROKBOTS_BRIDGE_KEY not set"]);
   assert.equal(loadBridge({ GROKBOTS_BRIDGE_URL: "${GROKBOTS_BRIDGE_URL}", GROKBOTS_BRIDGE_KEY: "${GROKBOTS_BRIDGE_KEY}" }).configured, false);
+});
+
+test("bridge URL with a path prefix: calls and the dry-run reply URL keep it (URL joining)", async () => {
+  assert.equal(bridgeUrl("https://bridge.example.com", "/grokbuild/expect"), "https://bridge.example.com/grokbuild/expect");
+  assert.equal(bridgeUrl("https://bridge.example.com/base", "/grokbuild/expect"), "https://bridge.example.com/base/grokbuild/expect");
+  assert.equal(bridgeUrl("https://bridge.example.com/base/", "grokbuild/requests/x?waitSec=5"), "https://bridge.example.com/base/grokbuild/requests/x?waitSec=5");
+  const pv = (u: string) => replyUrlPreview(loadBridge({ GROKBOTS_BRIDGE_URL: u, GROKBOTS_BRIDGE_KEY: BRIDGE_KEY }));
+  assert.equal(pv("https://bridge.example.com"), "https://bridge.example.com/grokbuild/reply");
+  assert.equal(pv("https://bridge.example.com/"), "https://bridge.example.com/grokbuild/reply");
+  assert.equal(pv("https://bridge.example.com/base"), "https://bridge.example.com/…/grokbuild/reply");
+  assert.equal(pv("https://bridge.example.com/a/base"), "https://bridge.example.com/a/…/grokbuild/reply");
+
+  const bridge = await fakeBridge({ prefix: "/base" });
+  const routine = await fakeRoutine("prefixed ok");
+  try {
+    env(routine.url, `${bridge.url}/base`);
+    const dry = out(await handleTool("send_prompt", { prompt: "x" }, ro));
+    assert.equal(dry.payload.reply.url, `${bridge.url}/…/grokbuild/reply`);
+    const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: true, timeoutSec: 10 }, ro));
+    assert.deepEqual([r.ok, r.waitResult.replies[0].content], [true, "prefixed ok"]);
+    assert.equal(routine.hits[0].body.reply.url, `${bridge.url}/base/grokbuild/reply`);
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("webhook refused after /expect: the reply route is cancelled (best effort)", async () => {
+  for (const [status, success] of [[404, true], [200, false]] as const) {
+    const bridge = await fakeBridge();
+    const routine = await fakeRoutine(undefined, 0, status, success);
+    try {
+      env(routine.url, bridge.url);
+      const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: true, timeoutSec: 5 }, ro));
+      assert.equal(r.ok, false);
+      assert.deepEqual([r.reply.expected, r.reply.cancelled], [false, true]);
+      assert.equal(r.waitResult, undefined, "no wait after a refused send");
+      const del = bridge.seen.find((x) => x.method === "DELETE");
+      assert.equal(del?.path, `/grokbuild/requests/${r.requestId}`);
+      assert.equal(del?.auth, `Bearer ${BRIDGE_KEY}`);
+      assert.equal(bridge.recs.size, 0);
+    } finally {
+      await routine.close();
+      await bridge.close();
+    }
+  }
+  // an accepted send is never cancelled
+  const bridge = await fakeBridge();
+  const routine = await fakeRoutine(undefined);
+  try {
+    env(routine.url, bridge.url);
+    const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true }, ro));
+    assert.equal(r.ok, true);
+    assert.equal(r.reply.cancelled, undefined);
+    assert.ok(!bridge.seen.some((x) => x.method === "DELETE"));
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("default wait fits common tool-call timeouts", () => {
+  assert.equal(DEFAULT_WAIT_SEC, 45);
 });

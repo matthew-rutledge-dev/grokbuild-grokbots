@@ -11,7 +11,7 @@ import { READ_ONLY_ENV, describeReadOnly, type ReadOnlyResolution } from "./read
 import { jsonResult, type ToolResult } from "./result.js";
 import { loadRoster, publicBot, redactUrl, type BotEntry } from "./roster.js";
 import { SERVER_NAME, VERSION } from "./version.js";
-import { DEFAULT_WAIT_SEC, MAX_WAIT_SEC, expectReply, loadBridge, publicBridge, waitReply, type WaitResult } from "./bridge.js";
+import { DEFAULT_WAIT_SEC, MAX_WAIT_SEC, cancelReply, expectReply, loadBridge, publicBridge, replyUrlPreview, waitReply, type WaitResult } from "./bridge.js";
 import { KEY_INVALID_MESSAGE, isValidKey, postWebhook } from "./webhook.js";
 
 export { READ_ONLY_ENV };
@@ -29,7 +29,7 @@ export const REPLY_HOW =
 const timeoutArg = {
   timeoutSec: {
     type: "integer",
-    description: `How long to wait for the bot's reply (default ${DEFAULT_WAIT_SEC}, max ${MAX_WAIT_SEC}).`,
+    description: `How long to wait for the bot's reply in this call (default ${DEFAULT_WAIT_SEC}, max ${MAX_WAIT_SEC}). Hosts often end a tool call after about 60 s, so keep it at or under the default and call wait_reply again if no reply yet.`,
   },
 };
 
@@ -187,7 +187,7 @@ async function deliver(bot: BotEntry, payload: Record<string, unknown>, confirm:
   const wantReply = Boolean(replyOpts?.expectReply);
   // The preview never carries a reply token: it is minted only for a confirmed send.
   const shown = wantReply
-    ? { ...payload, reply: { url: bridge.url ? `${redactUrl(bridge.url)}grokbuild/reply` : undefined, requestId: payload.requestId, token: "(issued by the bridge on confirm)", expiresAt: "(on confirm)", how: REPLY_HOW } }
+    ? { ...payload, reply: { url: replyUrlPreview(bridge), requestId: payload.requestId, token: "(issued by the bridge on confirm)", expiresAt: "(on confirm)", how: REPLY_HOW } }
     : payload;
   const preview = { bot: bot.name, target: redactUrl(bot.url), payload: shown };
   if (bot.problems.length) {
@@ -230,6 +230,11 @@ async function deliver(bot: BotEntry, payload: Record<string, unknown>, confirm:
   }
   const res = await postWebhook(bot.url as string, key, body);
   const accepted = res.ok && (res.body as { success?: unknown })?.success !== false;
+  // The routine surely did not take it (refused before sending, non-2xx, or success:false): free the
+  // bridge slot now. Not on sent:"unknown" or a 2xx whose body could not be read: the bot may still reply.
+  if (replyInfo && !accepted && res.sent !== "unknown" && res.error !== "webhook_response_read_failed") {
+    replyInfo = { ...replyInfo, expected: false, cancelled: await cancelReply(bridge, String(payload.requestId)) };
+  }
   let waited: Record<string, unknown> | undefined;
   if (accepted && replyInfo && replyOpts?.wait) waited = waitBody(await waitReply(bridge, String(payload.requestId), replyOpts.timeoutSec));
   return jsonResult(

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6
+
+- Bridge URLs are joined with `URL`, so a `GROKBOTS_BRIDGE_URL` with a path prefix (`https://bridge.example.com/base`) works for every call, and the dry-run `reply.url` preview is built correctly (base path redacted like other URLs).
+- If the webhook POST fails after the bridge issued a reply route (refused before sending, non-2xx, or `success: false`), `send_prompt` cancels it (`DELETE /grokbuild/requests/<id>`, best effort, needs bridge 0.2.1) and reports `reply: {expected: false, cancelled}`. Not on `sent: "unknown"` or `webhook_response_read_failed`.
+- Default wait lowered from 60 s to 45 s for `wait: true` and `wait_reply`, to fit common MCP tool-call timeouts; docs say hosts may time out sooner and suggest `wait_reply` in a loop.
+- README: the reply token appears in the bot's routine run history; acceptable because it is single-use with a 15-minute TTL. Same note in `grokbots-routine-setup`.
+- Tests: path-prefix joining and preview, cancel on a refused webhook (and none on success), default wait (34 tests).
+- Bump manifests, MCP package and `VERSION` to `0.1.6`.
+
 ## 0.1.5
 
 - **Replies through an optional bridge.** New user-level variables `GROKBOTS_BRIDGE_URL` / `GROKBOTS_BRIDGE_KEY` (declared in all three manifests and passed through `.mcp.json` / `mcp.json`). With both set, a confirmed `send_prompt` first asks the bridge's GrokBuild adapter (`POST /grokbuild/expect`, grok-bot-universal-bridge 0.2.0+) for a one-time reply token scoped to its `requestId`, then adds `reply: {url, requestId, token, expiresAt, how}` to the webhook body. If the bridge refuses, nothing is sent (`errorCode: "bridge_*"`). The bridge key never goes in a payload, and the reply token never appears in tool output (the dry-run shows a placeholder).
