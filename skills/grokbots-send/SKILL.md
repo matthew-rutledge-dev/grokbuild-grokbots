@@ -13,11 +13,17 @@ The `grokbots` MCP server POSTs once to a Grok Bot's **webhook-triggered routine
 2. **Check it.** `check_bot` with `bot` confirms the URL is https (or loopback http) and a valid key is present. No network call. `bot` can be left out only when exactly one bot is configured.
 3. **Preview.** Call `send_prompt` (or `wake_bot`) **without** `confirm`. You get a dry-run with the exact JSON payload and a redacted target. Nothing is sent.
 4. **Confirm.** Show the user the bot name and the prompt. Only after they agree, call again with `confirm: true`. One POST, 8 s timeout, no retry.
-5. **Read the result.** `ok: true` with HTTP 200 (`{success:true, runUuid}`) means the routine accepted it. Otherwise read `error` and `sent`:
-   - `webhook_http_401` / `_403` = wrong key or header, `webhook_http_404` = wrong URL or deleted routine (`sent: true`).
-   - `webhook_timeout` / `webhook_network_error` = no HTTP response (`httpStatus` 0, `sent: "unknown"`). The routine may already have it: check the bot's own chat before sending again.
-   - `webhook_response_read_failed` = the routine answered (`httpStatus` set) but its reply body couldn't be read (`sent: true`). Don't resend.
-   - `webhook_key_invalid` = key refused before sending (`sent: false`).
+5. **Read the result.** `ok: true` with HTTP 200 (`{success:true, runUuid}`) means the routine accepted it. Otherwise:
+   - **Refused before sending** (`sent: false`, nothing went out; the result's `error` is a sentence, not a code):
+     - "Bot is not ready. Nothing sent." with a `problems` list: the bot's config failed the roster checks (URL not https, key not set, key not available from its `keyEnv` / `keyFile`, or a key that isn't printable ASCII). This is checked when the roster loads, so it shows up on the dry-run too, and `list_bots` / `check_bot` show the same `problems`. Fix the config (skill `grokbots-roster`).
+     - "Key not available. Nothing sent.": the key passed the roster check but was gone when the confirmed send re-read it (for example the key file was removed in between).
+     - A key that changed to an invalid value in between: `errorCode: "webhook_key_invalid"` (the code is in `errorCode`; `error` holds the message).
+     - Unknown bot, several bots and no `bot` given, no bots configured, or an empty or too-long prompt: `error` says which.
+   - **Sent** (`error` is a fixed code; read it with `sent`):
+     - `webhook_http_401` / `_403` = wrong key or header, `webhook_http_404` = wrong URL or deleted routine (`sent: true`).
+     - `webhook_timeout` / `webhook_network_error` = no HTTP response (`httpStatus` 0, `sent: "unknown"`). The routine may already have it: check the bot's own chat before sending again.
+     - `webhook_response_read_failed` = the routine answered (`httpStatus` set) but its reply body couldn't be read (`sent: true`). Don't resend.
+     - HTTP 200 whose body says `success: false`: `ok: false`, `sent: true`, no `error`; see `response`.
    Don't retry in a loop; report it.
 
 ## Rules
