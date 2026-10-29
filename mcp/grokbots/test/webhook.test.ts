@@ -121,3 +121,23 @@ test("webhookErrorCode never uses the message text", () => {
   assert.equal(webhookErrorCode(Object.assign(new Error(KEY), { name: "AbortError" })), "webhook_timeout");
   assert.equal(webhookErrorCode(undefined), "webhook_network_error");
 });
+
+test("body read fails after headers: own code, sent true, status kept, no raw message", async () => {
+  const mock = await server((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "1000" });
+    res.write('{"success":tr');
+    setTimeout(() => res.socket?.destroy(), 20);
+  });
+  try {
+    const r = await postWebhook(mock.url, KEY, { kind: "wake" });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 200);
+    assert.equal(r.sent, true);
+    assert.equal(r.error, "webhook_response_read_failed");
+    assert.equal(r.body, null);
+    assert.equal(mock.hits(), 1);
+    assert.ok(!JSON.stringify(r).includes(KEY));
+  } finally {
+    await mock.close();
+  }
+});

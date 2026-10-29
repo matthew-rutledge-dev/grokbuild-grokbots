@@ -39,10 +39,11 @@ if (-not (Test-Path -LiteralPath $pkgJson)) {
   Write-Error "bootstrap-mcp: missing $pkgJson"
   exit 1
 }
-Write-Host "bootstrap-mcp: npm ci in mcp/$pkg"
+Write-Host "bootstrap-mcp: npm ci --omit=dev in mcp/$pkg"
 Push-Location -LiteralPath $dir
 try {
-  & $npmExe ci
+  # Runtime + build deps only (typescript is a dependency); dev-only tsx/esbuild are skipped.
+  & $npmExe ci --omit=dev
   if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
   }

@@ -148,7 +148,7 @@ async function deliver(bot: BotEntry, payload: Record<string, unknown>, confirm:
       error: res.error,
       note: accepted
         ? "Routine accepted the POST (expect HTTP 200 with {success:true, runUuid}). The bot runs it on its own; no reply comes back here."
-        : "Not accepted. webhook_http_401/403 = wrong key or header, webhook_http_404 = wrong URL or deleted routine, webhook_timeout / webhook_network_error = no HTTP response (sent: \"unknown\", the routine may or may not have received it). Not retried.",
+        : "Not accepted. webhook_http_401/403 = wrong key or header, webhook_http_404 = wrong URL or deleted routine, webhook_timeout / webhook_network_error = no HTTP response (sent: \"unknown\", the routine may or may not have received it), webhook_response_read_failed = the routine answered (see httpStatus) but its reply body could not be read (sent: true, do not resend). Not retried.",
     },
     !accepted,
   );

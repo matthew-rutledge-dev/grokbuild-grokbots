@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2
+
+- New error code `webhook_response_read_failed` (`sent: true`, `httpStatus` kept) when the routine answers but reading its reply body fails. It used to return `webhook_timeout` / `webhook_network_error` with `sent: true`, which contradicted the README table where those codes mean "no response" (`sent: "unknown"`). Test added; README error table and the tool's not-accepted note updated.
+- `tsx` moved to `devDependencies` (only the `dev` and `test` scripts use it). The bootstrap scripts now run `npm ci --omit=dev`, so a plugin install no longer installs `tsx` / `esbuild` and runs no package install scripts. `typescript` and `@types/node` stay in `dependencies` because the bootstrap builds with `tsc`.
+- README "Install scripts" note rewritten to match: nothing the bootstrap installs declares an install script (`npm query` prints `[]`).
+- `npm audit`: 0 vulnerabilities. Bump manifests, MCP package and `VERSION` to `0.1.2`.
+
 ## 0.1.1
 
 - `sent` is now `"unknown"` (was `true`) when the POST throws with no HTTP response (`webhook_timeout`, `webhook_network_error`), because the request may or may not have reached the routine. A key refused before the request is still `sent: false`; any HTTP response is still `sent: true`. New `SentState` type; README error table added.
