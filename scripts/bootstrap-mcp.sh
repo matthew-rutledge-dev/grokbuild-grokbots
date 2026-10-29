@@ -42,8 +42,9 @@ if [[ ! -f "$dir/package.json" ]]; then
   echo "bootstrap-mcp: missing $dir/package.json" >&2
   exit 1
 fi
-echo "bootstrap-mcp: npm ci in mcp/$pkg"
-(cd "$dir" && "$NPM" ci)
+# Runtime + build deps only (typescript is a dependency); dev-only tsx/esbuild are skipped.
+echo "bootstrap-mcp: npm ci --omit=dev in mcp/$pkg"
+(cd "$dir" && "$NPM" ci --omit=dev)
 # MCP configs launch dist/index.js by absolute path, so build it here.
 echo "bootstrap-mcp: npm run build in mcp/$pkg"
 (cd "$dir" && "$NPM" run build)

@@ -1,6 +1,6 @@
 {
   "name": "grokbots-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "MCP server: wake a Grok Bot or send it a prompt through its webhook-triggered routine (confirm-gated; GROKBOTS_READ_ONLY on hides writes)",
@@ -15,8 +15,10 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^22.13.10",
-    "tsx": "^4.19.3",
     "typescript": "^5.8.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3"
   },
   "main": "dist/index.js"
 }

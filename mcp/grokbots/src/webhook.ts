@@ -8,7 +8,8 @@
  *
  * `sent` says whether the routine got the request:
  *   false     nothing went out (key refused before fetch)
- *   true      an HTTP response came back, so the request arrived
+ *   true      an HTTP status line came back, so the request arrived (this includes
+ *             webhook_response_read_failed: status received, body cut off)
  *   "unknown" fetch threw (network error, timeout, refused redirect); the request
  *             may or may not have reached the routine, so do not assume either way
  */
@@ -18,6 +19,7 @@ export type WebhookErrorCode =
   | "webhook_key_invalid"
   | "webhook_timeout"
   | "webhook_network_error"
+  | "webhook_response_read_failed"
   | `webhook_http_${number}`;
 
 /** Whether the request reached the routine. "unknown" when fetch threw after it may have gone out. */
@@ -62,8 +64,11 @@ export async function postWebhook(url: string, key: string, payload: unknown, ti
     let text = "";
     try {
       text = (await res.text()).slice(0, 2000);
-    } catch (e) {
-      return { ok: false, status: res.status, body: null, error: webhookErrorCode(e), sent: true };
+    } catch {
+      // Headers (status) arrived, then reading the body failed (reset, timeout mid-body).
+      // The routine did get the request, so sent stays true, but this is its own code:
+      // webhook_timeout / webhook_network_error mean "no response" and map to "unknown".
+      return { ok: false, status: res.status, body: null, error: "webhook_response_read_failed", sent: true };
     }
     let body: unknown = text;
     try {
