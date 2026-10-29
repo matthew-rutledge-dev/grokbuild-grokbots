@@ -72,15 +72,26 @@ This repo is the single source for waking or prompting a Grok Bot from Grok Buil
 
 Part of the single source above. To get the bot's answer back into Grok Build or Cursor, run the GrokBuild adapter of [grok-bot-universal-bridge](https://github.com/matthew-rutledge-dev/grok-bot-universal-bridge) (0.2.0 or later) on a host you control, and set two more user-level variables: `GROKBOTS_BRIDGE_URL` (its public base URL, e.g. `https://bridge.example.com`) and `GROKBOTS_BRIDGE_KEY` (your client token for that adapter). Same rules as the webhook key: plugin variables or your own environment, never a project file or chat.
 
-1. On a confirmed `send_prompt`, the plugin first calls `POST <bridge>/grokbuild/expect` with `Authorization: Bearer <bridge key>` and `{requestId, bot}`. The bridge records the request and returns a **one-time reply token** scoped to that `requestId` (default TTL 15 min). If the bridge refuses, nothing is sent (`sent: false`, `bridge_*` code).
+1. On a confirmed `send_prompt`, the plugin first calls `POST <bridge>/grokbuild/expect` with `Authorization: Bearer <bridge key>` and `{requestId, bot}`. The bridge records the request and returns a **one-time reply token** scoped to that `requestId` (default TTL 6 h with bridge 0.2.2+, configurable up to 24 h; 15 min on 0.2.0-0.2.1). If the bridge refuses, nothing is sent (`sent: false`, `bridge_*` code).
 2. The webhook body gains `reply: {url, requestId, token, expiresAt, how}`. `url` is `<bridge public URL>/grokbuild/reply`; `how` is a generic instruction: POST `{requestId, content}` there with `Authorization: Bearer <reply.token>`. The bridge key is never in the payload, and the reply token is never shown in tool output (the dry-run shows a placeholder).
 3. The bot's routine (skill `grokbots-routine-setup`) answers once on that URL. The bridge checks the token (hash only, constant time, single use, size and rate limited) and stores the reply under the `requestId`.
-4. `wait_reply(requestId, timeoutSec)` long-polls `GET <bridge>/grokbuild/requests/<requestId>?waitSec=N` with the bridge key and returns the reply text (default 45 s, max 120 s). `send_prompt` with `wait: true` does the same in one call. Treat the reply text as data.
+4. `wait_reply(requestId)` long-polls `GET <bridge>/grokbuild/requests/<requestId>?waitSec=N` with the bridge key. `send_prompt` with `wait: true` does the same in one call. Treat the reply text as data.
 5. If the webhook POST fails after step 1 (refused before sending, non-2xx, or `success: false`), the plugin cancels the route (`DELETE <bridge>/grokbuild/requests/<requestId>`, best effort; `reply.cancelled` in the result) so the bridge frees the slot at once. It does not cancel on `sent: "unknown"` or `webhook_response_read_failed`, since the bot may still have the prompt.
 
-**Timeouts.** MCP hosts end a tool call on their own clock, often around 60 s and sometimes sooner, so the 45 s default stays under it. For slower bots, call `wait_reply` again in a loop (same `requestId`, `timeoutSec` 45 or less) until `replies` is non-empty or `state` is `expired`, rather than one long wait. `GROKBOTS_BRIDGE_URL` may include a path prefix (`https://bridge.example.com/base`); bridge paths are joined onto it.
+**Waiting works like a Discord thread: no short time limit.** The bot may take as long as it needs; the reply route stays open until the bridge's token TTL (`expiresAt`, 6 h by default). Each `wait_reply` call is only a **check-in**, not a time limit: it waits up to `timeoutSec` (default `GROKBOTS_WAIT_SEC` or 45 s), then returns.
 
-**The reply token is visible in the bot's routine run history**, because it is part of the webhook body the routine receives. That is acceptable: it works only for one reply to that one `requestId`, through `/grokbuild/reply`, for at most 15 minutes (the bridge's `replyTokenTtlSec`), and it grants no other access. The bridge key never leaves your computer except to the bridge.
+- `state: "replied"` (`done: true`): `replies[]` has the answer.
+- `state: "awaiting_reply"` (`done: false`, not an error): no reply yet. The result carries `requestId`, `elapsedSec` (since the send), `waitingFor` (`"still waiting, 12 min"`), `expiresAt`, `next: {tool: "wait_reply", arguments: {requestId}}` and an `instruction`. The host agent posts a short progress line to the user and calls `wait_reply` again.
+- `state: "expired"` or `"cancelled"` (`done: true`): stop. The bridge reports these directly while it keeps a short tombstone (0.2.3+). After that, a 404 means `expired` if the last known `expiresAt` has passed, and `cancelled` if this process saw the route before.
+- `state: "not_found"` (`done: true`): the bridge never knew this `requestId` here. Either the id is wrong, or `GROKBOTS_BRIDGE_URL` points at the wrong path or at a proxy answering 404.
+- `state: "config_error"` (`done: true`): the bridge refused `GROKBOTS_BRIDGE_KEY` (401). Retrying won't help; fix the key and restart the host.
+- `state: "aborted"` (`done: false`): the host cancelled the call. Polling and progress stop at once, and the route stays open, so `wait_reply` can resume. Bridge unreachable is also `done: false`: try again later.
+
+Why 45 s per call: MCP hosts end a tool call on their own clock, often around 60 s and sometimes sooner. If your host allows longer calls, raise `GROKBOTS_WAIT_SEC` (max 600) or pass `timeoutSec`.
+
+**`untilReply: true`** (on `wait_reply` or `send_prompt` with `wait: true`) keeps waiting inside one call, but only as long as is safe. If the host asked for progress (an MCP `progressToken`), the plugin sends a `notifications/progress` update ("still waiting, N min") at most once every 25 s. It stays throttled even when the bridge answers at once, which happens when it is busy (`maxLongPolls` reached) or has long-polling off; reads then come about every 2 s. The plugin keeps going up to `GROKBOTS_WAIT_MAX_SEC` (default 300 s, max 3600). Hosts that reset their timeout on progress then never cut it off. Without a `progressToken`, it waits one check-in only and says so (`untilReply: "limited: …"`). Either way, an `awaiting_reply` result just means: call again. `GROKBOTS_BRIDGE_URL` may include a path prefix (`https://bridge.example.com/base`); bridge paths are joined onto it.
+
+**The reply token is visible in the bot's routine run history**, because it is part of the webhook body the routine receives. That is acceptable: it works only for one reply to that one `requestId`, through `/grokbuild/reply`, until it expires (the bridge's `replyTokenTtlSec`, 6 h by default), and it grants no other access. The bridge key never leaves your computer except to the bridge.
 
 `expectReply: false` sends one-way even with a bridge set. Without the bridge variables, `send_prompt` works as before and `wait_reply` returns `bridge_not_configured`. Bridge host setup (env vars, port, firewall): the adapter README in that repo.
 
@@ -95,6 +106,8 @@ Part of the single source above. To get the bot's answer back into Grok Build or
 | `GROKBOTS_SENDER` | no | `from` label in each POST (default `grokbuild`) |
 | `GROKBOTS_BRIDGE_URL` | for replies | Base URL of your reply bridge (https; plain http only to loopback for tests). See [Replies](#replies-optional-bridge) |
 | `GROKBOTS_BRIDGE_KEY` | for replies | Your client token for that bridge's GrokBuild adapter. Sent only to the bridge, never in a payload |
+| `GROKBOTS_WAIT_SEC` | no | Check-in interval of one `wait_reply` / `wait: true` call (default 45, 5-600). Not a time limit |
+| `GROKBOTS_WAIT_MAX_SEC` | no | How long one `untilReply` call may keep going while the host receives progress updates (default 300, 30-3600) |
 | `GROKBOTS_READ_ONLY` | no | `1`/`true`/`yes`/`on` hides the write tools; `0`/`false`/`no`/`off`/unset = off; **any other value = on** (fails closed, one warning on stderr) |
 
 Unset variables that a host passes through literally (`${GROKBOTS_WEBHOOK_URL}`) count as unset.
@@ -130,7 +143,7 @@ Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sendin
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 34 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # 43 tests; a loopback mock stands in for the routine
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).

@@ -10,13 +10,13 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, test } from "node:test";
 import { REPLY_HOW, handleTool } from "../src/tools.js";
-import { DEFAULT_WAIT_SEC, bridgeUrl, loadBridge, replyUrlPreview, waitReply } from "../src/bridge.js";
+import { DEFAULT_WAIT_SEC, bridgeUrl, checkInSec, loadBridge, progressTiming, replyUrlPreview, untilReplySec, waitReply, waitingFor } from "../src/bridge.js";
 
 const ROUTINE_KEY = "placeholder-key-11111111";
 const BRIDGE_KEY = "placeholder-bridge-client-22222222";
 const ro = { readOnly: { readOnly: false, source: "default" } } as never;
 
-type Rec = { token?: string; expires: number; replies: { content: string; at: string }[]; waiters: (() => void)[] };
+type Rec = { token?: string; created?: number; expires: number; replies: { content: string; at: string }[]; waiters: (() => void)[] };
 
 async function listen(srv: http.Server) {
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
@@ -30,8 +30,9 @@ function readJson(req: http.IncomingMessage): Promise<any> {
   });
 }
 
-async function fakeBridge(opts: { expectStatus?: number; prefix?: string } = {}) {
+async function fakeBridge(opts: { expectStatus?: number; prefix?: string; maxWait?: number } = {}) {
   const recs = new Map<string, Rec>();
+  const tombstones = new Map<string, string>();
   const seen: { method?: string; path: string; auth?: string; body?: any }[] = [];
   let base = "";
   const srv = http.createServer(async (req, res) => {
@@ -48,7 +49,7 @@ async function fakeBridge(opts: { expectStatus?: number; prefix?: string } = {})
       if (!client) return send(401, { ok: false, error: "unauthorized" });
       if (opts.expectStatus) return send(opts.expectStatus, { ok: false, error: "read_only" });
       const token = crypto.randomBytes(32).toString("base64url");
-      recs.set(body.requestId, { token, expires: Date.now() + 60_000, replies: [], waiters: [] });
+      recs.set(body.requestId, { token, created: Date.now(), expires: Date.now() + 60_000, replies: [], waiters: [] });
       return send(201, { ok: true, requestId: body.requestId, replyUrl: `${base}${opts.prefix ?? ""}/grokbuild/reply`, replyToken: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
     }
     if (url.pathname === "/grokbuild/reply") {
@@ -69,22 +70,30 @@ async function fakeBridge(opts: { expectStatus?: number; prefix?: string } = {})
         for (const w of r.waiters.splice(0)) w();
         return send(200, { ok: true, requestId: m[1], cancelled: true });
       }
-      const wait = Math.min(Number(url.searchParams.get("waitSec") ?? 0), 25);
+      const wait = Math.min(Number(url.searchParams.get("waitSec") ?? 0), opts.maxWait ?? 25);
       if (!r.replies.length && wait > 0) await new Promise<void>((done) => { r.waiters.push(done); setTimeout(done, wait * 1000); });
-      return send(200, { ok: true, requestId: m[1], state: r.replies.length ? "replied" : "awaiting_reply", replies: r.replies });
+      return send(200, {
+        ok: true,
+        requestId: m[1],
+        state: tombstones.get(m[1]) ?? (r.replies.length ? "replied" : "awaiting_reply"),
+        replies: r.replies,
+        ...(r.created ? { createdAt: new Date(r.created).toISOString(), expiresAt: new Date(r.expires).toISOString() } : {}),
+      });
     }
     send(404, { ok: false, error: "not_found" });
   });
   base = await listen(srv);
-  return { url: base, seen, recs, close: () => new Promise<void>((r) => (srv.closeAllConnections(), srv.close(() => r()))) };
+  return { url: base, seen, recs, tombstones, close: () => new Promise<void>((r) => (srv.closeAllConnections(), srv.close(() => r()))) };
 }
 
 /** The webhook routine + woken bot: 200 to the webhook, then (optionally) a reply on reply.url. */
-async function fakeRoutine(answer: string | undefined, delayMs = 150, status = 200, success = true) {
+async function fakeRoutine(answer: string | undefined, delayMs = 150, status = 200, success = true, drop = false) {
   const hits: any[] = [];
   const srv = http.createServer(async (req, res) => {
     const body = await readJson(req);
     hits.push({ headers: req.headers, body });
+    // drop: the request arrived but the connection dies before any answer (sent: "unknown")
+    if (drop) return void req.socket.destroy();
     res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ success, runUuid: "00000000-0000-0000-0000-000000000000" }));
     const reply = body.reply;
     if (answer && reply) {
@@ -101,7 +110,7 @@ async function fakeRoutine(answer: string | undefined, delayMs = 150, status = 2
   return { url: `${base}/automations/webhook/11111111`, hits, close: () => new Promise<void>((r) => (srv.closeAllConnections(), srv.close(() => r()))) };
 }
 
-const KEYS = ["GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_BRIDGE_URL", "GROKBOTS_BRIDGE_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_DEFAULT_BOT"];
+const KEYS = ["GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_BRIDGE_URL", "GROKBOTS_BRIDGE_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_DEFAULT_BOT", "GROKBOTS_WAIT_SEC", "GROKBOTS_WAIT_MAX_SEC"];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 afterEach(() => {
   for (const k of KEYS) {
@@ -148,7 +157,7 @@ test("end to end: send_prompt gets a reply route, the bot answers, wait_reply re
     assert.deepEqual(bridge.seen[0].body, { requestId, bot: "example-agent" });
 
     const w = out(await handleTool("wait_reply", { requestId, timeoutSec: 10 }, ro));
-    assert.deepEqual([w.ok, w.state, w.replies[0].content], [true, "replied", "Done: 3 files changed."]);
+    assert.deepEqual([w.ok, w.done, w.state, w.replies[0].content], [true, true, "replied", "Done: 3 files changed."]);
   } finally {
     await routine.close();
     await bridge.close();
@@ -162,7 +171,7 @@ test("send_prompt wait=true returns the reply in one call", async () => {
     env(routine.url, bridge.url);
     const r = out(await handleTool("send_prompt", { prompt: "ping", confirm: true, wait: true, timeoutSec: 10 }, ro));
     assert.equal(r.ok, true);
-    assert.deepEqual([r.waitResult.ok, r.waitResult.replies[0].content], [true, "pong"]);
+    assert.deepEqual([r.waitResult.ok, r.waitResult.state, r.waitResult.replies[0].content], [true, "replied", "pong"]);
   } finally {
     await routine.close();
     await bridge.close();
@@ -293,4 +302,180 @@ test("webhook refused after /expect: the reply route is cancelled (best effort)"
 
 test("default wait fits common tool-call timeouts", () => {
   assert.equal(DEFAULT_WAIT_SEC, 45);
+});
+
+test("heartbeat: no reply yet is awaiting_reply (not an error) with elapsed time and a next step; later the reply lands", async () => {
+  const bridge = await fakeBridge();
+  const routine = await fakeRoutine(undefined);
+  try {
+    env(routine.url, bridge.url);
+    const sent = out(await handleTool("send_prompt", { prompt: "long job", confirm: true, wait: true, timeoutSec: 1 }, ro));
+    assert.equal(sent.ok, true);
+    const hb = sent.waitResult;
+    assert.deepEqual([hb.ok, hb.done, hb.state, hb.requestId], [true, false, "awaiting_reply", sent.requestId]);
+    assert.ok(typeof hb.elapsedSec === "number" && hb.elapsedSec >= 1);
+    assert.match(hb.waitingFor, /^still waiting, \d+ s$/);
+    assert.deepEqual(hb.next, { tool: "wait_reply", arguments: { requestId: sent.requestId } });
+    assert.match(hb.instruction, /Not a timeout.*call wait_reply again/);
+    assert.ok(hb.expiresAt);
+    // a later check-in: still waiting, not an MCP error
+    const res = await handleTool("wait_reply", { requestId: sent.requestId, timeoutSec: 1 }, ro);
+    assert.ok(!res?.isError, "awaiting_reply is not an error");
+    assert.equal(out(res).state, "awaiting_reply");
+    // the bot answers much later; the next check-in gets it
+    const hook = routine.hits[0].body.reply;
+    await fetch(hook.url, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${hook.token}` }, body: JSON.stringify({ requestId: hook.requestId, content: "finally" }) });
+    const done = out(await handleTool("wait_reply", { requestId: sent.requestId, timeoutSec: 5 }, ro));
+    assert.deepEqual([done.done, done.state, done.replies[0].content], [true, "replied", "finally"]);
+    // cancelled / unknown on the bridge: done, stop waiting
+    bridge.recs.clear();
+    const gone = await handleTool("wait_reply", { requestId: sent.requestId, timeoutSec: 1 }, ro);
+    assert.equal(gone?.isError, true);
+    assert.deepEqual([out(gone).done, out(gone).state], [true, "cancelled"]);
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("untilReply: with host progress it keeps waiting past the check-in and reports progress; without, one check-in", async () => {
+  const bridge = await fakeBridge({ maxWait: 1 });
+  const routine = await fakeRoutine("slow answer", 3500);
+  try {
+    env(routine.url, bridge.url);
+    process.env.GROKBOTS_WAIT_MAX_SEC = "30";
+    progressTiming.everySec = 0; // unthrottled here; the throttle has its own test
+    const ticks: { n: number; m: string }[] = [];
+    const ctx = { ...ro, progress: async (n: number, m: string) => void ticks.push({ n, m }) };
+    const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: true, untilReply: true, timeoutSec: 1 }, ctx as never));
+    assert.deepEqual([r.waitResult.state, r.waitResult.replies[0].content], ["replied", "slow answer"]);
+    assert.ok(ticks.length >= 2, `progress updates sent (${ticks.length})`);
+    assert.match(ticks[0].m, /^still waiting, \d+ s for /);
+    assert.ok(ticks.every((t, i) => i === 0 || t.n >= ticks[i - 1].n), "progress never goes down");
+    // no progressToken: untilReply is limited to one check-in and says so
+    const id = "pending-0002";
+    bridge.recs.set(id, { created: Date.now(), expires: Date.now() + 60_000, replies: [], waiters: [] });
+    const lim = out(await handleTool("wait_reply", { requestId: id, untilReply: true, timeoutSec: 1 }, ro));
+    assert.equal(lim.state, "awaiting_reply");
+    assert.match(lim.untilReply, /^limited/);
+  } finally {
+    progressTiming.everySec = 25;
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("progress is throttled to once per ~25 s even when the bridge answers at once (busy / long-poll off)", async () => {
+  const bridge = await fakeBridge({ maxWait: 0 });
+  const routine = await fakeRoutine("quick-ish", 5000);
+  try {
+    env(routine.url, bridge.url);
+    process.env.GROKBOTS_WAIT_MAX_SEC = "30";
+    const ticks: string[] = [];
+    const ctx = { ...ro, progress: async (_n: number, m: string) => void ticks.push(m) };
+    const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: true, untilReply: true, timeoutSec: 1 }, ctx as never));
+    assert.equal(r.waitResult.state, "replied");
+    const reads = bridge.seen.filter((x) => x.method === "GET").length;
+    assert.ok(reads >= 2, `several immediate reads (${reads})`);
+    assert.equal(ticks.length, 1, "one progress update in ~5 s, not one per read");
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("abort: the host cancels an untilReply wait; polling and progress stop at once", async () => {
+  const bridge = await fakeBridge({ maxWait: 1 });
+  const routine = await fakeRoutine(undefined);
+  try {
+    env(routine.url, bridge.url);
+    process.env.GROKBOTS_WAIT_MAX_SEC = "60";
+    const sent = out(await handleTool("send_prompt", { prompt: "x", confirm: true }, ro));
+    const ac = new AbortController();
+    let ticks = 0;
+    const ctx = { ...ro, signal: ac.signal, progress: async () => void (ticks += 1) };
+    setTimeout(() => ac.abort(), 2500);
+    const t0 = Date.now();
+    const w = out(await handleTool("wait_reply", { requestId: sent.requestId, untilReply: true, timeoutSec: 1 }, ctx as never));
+    assert.ok(Date.now() - t0 < 3500, "returned promptly after the abort");
+    assert.deepEqual([w.state, w.done], ["aborted", false]);
+    const readsAtAbort = bridge.seen.filter((x) => x.method === "GET").length;
+    const ticksAtAbort = ticks;
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(bridge.seen.filter((x) => x.method === "GET").length, readsAtAbort, "no reads after the abort");
+    assert.equal(ticks, ticksAtAbort, "no progress after the abort");
+    assert.ok(!bridge.seen.some((x) => x.method === "DELETE"), "an aborted wait keeps the route (wait_reply can resume)");
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("final states: 404 split into expired / cancelled / not_found; 401 is a final config error; bridge tombstones", async () => {
+  const bridge = await fakeBridge();
+  const routine = await fakeRoutine(undefined);
+  try {
+    env(routine.url, bridge.url);
+    // never seen by this process: not_found with a config hint
+    const nf = out(await handleTool("wait_reply", { requestId: "never-seen-0001", timeoutSec: 1 }, ro));
+    assert.deepEqual([nf.done, nf.state], [true, "not_found"]);
+    assert.match(nf.note, /GROKBOTS_BRIDGE_URL/);
+    // seen, then gone before its expiry: cancelled
+    const a = out(await handleTool("send_prompt", { prompt: "x", confirm: true }, ro));
+    bridge.recs.delete(a.requestId);
+    assert.equal(out(await handleTool("wait_reply", { requestId: a.requestId, timeoutSec: 1 }, ro)).state, "cancelled");
+    // seen with an expiresAt that has passed, then swept: expired
+    const id = "expiring-0001";
+    bridge.recs.set(id, { created: Date.now(), expires: Date.now() + 1500, replies: [], waiters: [] });
+    assert.equal(out(await handleTool("wait_reply", { requestId: id, timeoutSec: 1 }, ro)).state, "awaiting_reply");
+    await new Promise((r) => setTimeout(r, 1000));
+    bridge.recs.delete(id);
+    const ex = out(await handleTool("wait_reply", { requestId: id, timeoutSec: 1 }, ro));
+    assert.deepEqual([ex.done, ex.state], [true, "expired"]);
+    // a tombstone read (bridge 0.2.3+) ends the wait with its state
+    bridge.recs.set("tomb-00000001", { created: Date.now(), expires: Date.now() + 60_000, replies: [], waiters: [] });
+    bridge.tombstones.set("tomb-00000001", "cancelled");
+    const tb = out(await handleTool("wait_reply", { requestId: "tomb-00000001", timeoutSec: 5 }, ro));
+    assert.deepEqual([tb.done, tb.state], [true, "cancelled"]);
+    // wrong bridge key: final, with a hint
+    env(routine.url, bridge.url, "wrong-key-33333333");
+    const k = out(await handleTool("wait_reply", { requestId: a.requestId, timeoutSec: 1 }, ro));
+    assert.deepEqual([k.done, k.state, k.error], [true, "config_error", "bridge_http_401"]);
+    assert.match(k.note, /GROKBOTS_BRIDGE_KEY/);
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("webhook connection dies after the POST (sent: unknown): the reply route is NOT cancelled", async () => {
+  const bridge = await fakeBridge();
+  const routine = await fakeRoutine(undefined, 0, 200, true, true);
+  try {
+    env(routine.url, bridge.url);
+    const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true }, ro));
+    assert.deepEqual([r.ok, r.sent, r.error], [false, "unknown", "webhook_network_error"]);
+    assert.equal(r.reply.expected, true);
+    assert.equal(r.reply.cancelled, undefined);
+    assert.ok(!bridge.seen.some((x) => x.method === "DELETE"), "no DELETE sent");
+    assert.equal(bridge.recs.size, 1, "route still open: the bot may still reply");
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("check-in and untilReply settings: env parsing and labels", () => {
+  assert.equal(checkInSec({}), 45);
+  assert.equal(checkInSec({ GROKBOTS_WAIT_SEC: "90" }), 90);
+  assert.equal(checkInSec({ GROKBOTS_WAIT_SEC: "1" }), 5);
+  assert.equal(checkInSec({ GROKBOTS_WAIT_SEC: "9999" }), 600);
+  assert.equal(checkInSec({ GROKBOTS_WAIT_SEC: "soon" }), 45);
+  assert.equal(checkInSec({ GROKBOTS_WAIT_SEC: "${GROKBOTS_WAIT_SEC}" }), 45);
+  assert.equal(untilReplySec({}), 300);
+  assert.equal(untilReplySec({ GROKBOTS_WAIT_MAX_SEC: "99999" }), 3600);
+  assert.equal(waitingFor(12), "still waiting, 12 s");
+  assert.equal(waitingFor(185), "still waiting, 3 min");
+  assert.equal(waitingFor(3 * 3600 + 20 * 60), "still waiting, 3 h 20 min");
+  assert.equal(waitingFor(7200), "still waiting, 2 h");
 });

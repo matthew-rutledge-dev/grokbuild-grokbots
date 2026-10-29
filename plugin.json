@@ -1,7 +1,7 @@
 {
   "name": "grokbuild-grokbots",
   "displayName": "GrokBuild to Grok Bots",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Let Grok Build (or Cursor) wake a Grok Bot or send it a prompt through the bot's own webhook-triggered routine. One grokbots MCP server with a roster, confirm-gated sends and an optional read-only mode, plus setup skills. Each installer uses their own routine URL and key.",
   "author": {
     "name": "Matthew Rutledge"
@@ -69,6 +69,16 @@
         "type": "string",
         "title": "Reply bridge client key",
         "description": "Optional. Your client token for that bridge's GrokBuild adapter, sent only as Authorization: Bearer to the bridge. Never put in a prompt or payload; never commit or paste it in chat."
+      },
+      "GROKBOTS_WAIT_SEC": {
+        "type": "string",
+        "title": "Reply check-in interval (seconds)",
+        "description": "Optional. How long one wait_reply / wait:true call waits before returning \"awaiting_reply\" so the host agent can post progress and call again (default 45, 5-600). A check-in interval, not a time limit."
+      },
+      "GROKBOTS_WAIT_MAX_SEC": {
+        "type": "string",
+        "title": "untilReply budget (seconds)",
+        "description": "Optional. How long one untilReply call may keep waiting while the host receives progress notifications (default 300, 30-3600)."
       }
     },
     "required": []

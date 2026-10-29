@@ -17,9 +17,44 @@ export const BRIDGE_URL_ENV = "GROKBOTS_BRIDGE_URL";
 export const BRIDGE_KEY_ENV = "GROKBOTS_BRIDGE_KEY";
 /** Longest single long-poll asked of the bridge (its maxWaitSec default is 25). */
 export const POLL_SEC = 25;
-export const MAX_WAIT_SEC = 120;
-/** Fits under common MCP tool-call timeouts (often about 60 s); hosts may cut a call sooner. */
+export const WAIT_SEC_ENV = "GROKBOTS_WAIT_SEC";
+export const WAIT_MAX_SEC_ENV = "GROKBOTS_WAIT_MAX_SEC";
+/**
+ * One call's wait is a check-in interval, not a time limit: the reply route lives for
+ * the bridge's token TTL (6 h by default) and the caller calls wait_reply again.
+ * 45 s fits under common MCP tool-call timeouts (often about 60 s).
+ */
 export const DEFAULT_WAIT_SEC = 45;
+/** Largest per-call wait a caller may ask for (only for hosts known to allow long tool calls). */
+export const MAX_WAIT_SEC = 600;
+/** untilReply with host progress notifications: how long one call may keep going (default / hard cap). */
+export const DEFAULT_UNTIL_REPLY_SEC = 300;
+export const MAX_UNTIL_REPLY_SEC = 3600;
+
+function intEnv(name: string, env: NodeJS.ProcessEnv, def: number, min: number, max: number): number {
+  const raw = readEnv(name, env);
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isInteger(n) ? Math.min(max, Math.max(min, n)) : def;
+}
+
+/** Per-call check-in interval: GROKBOTS_WAIT_SEC (5-600), default 45. */
+export function checkInSec(env: NodeJS.ProcessEnv = process.env): number {
+  return intEnv(WAIT_SEC_ENV, env, DEFAULT_WAIT_SEC, 5, MAX_WAIT_SEC);
+}
+
+/** untilReply budget for one call when the host sends progress: GROKBOTS_WAIT_MAX_SEC (30-3600), default 300. */
+export function untilReplySec(env: NodeJS.ProcessEnv = process.env): number {
+  return intEnv(WAIT_MAX_SEC_ENV, env, DEFAULT_UNTIL_REPLY_SEC, 30, MAX_UNTIL_REPLY_SEC);
+}
+
+/** "still waiting, 3 min" style label. */
+export function waitingFor(sec: number): string {
+  if (sec < 60) return `still waiting, ${Math.max(0, Math.round(sec))} s`;
+  if (sec < 3600) return `still waiting, ${Math.round(sec / 60)} min`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.round((sec % 3600) / 60);
+  return `still waiting, ${h} h${m ? ` ${m} min` : ""}`;
+}
 
 export type BridgeConfig = { url?: string; key?: string; problems: string[]; configured: boolean };
 
@@ -29,6 +64,7 @@ export type BridgeErrorCode =
   | "bridge_timeout"
   | "bridge_network_error"
   | "bridge_bad_response"
+  | "aborted"
   | `bridge_http_${number}`;
 
 export function loadBridge(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
@@ -67,11 +103,22 @@ export function replyUrlPreview(b: BridgeConfig): string | undefined {
 
 type CallResult = { ok: true; status: number; body: Record<string, unknown> } | { ok: false; status: number; error: BridgeErrorCode; detail?: string };
 
-async function call(b: BridgeConfig, method: "GET" | "POST" | "DELETE", path: string, body: unknown, timeoutMs: number): Promise<CallResult> {
+async function call(
+  b: BridgeConfig,
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<CallResult> {
   if (!b.configured) return { ok: false, status: 0, error: "bridge_not_configured" };
   if (b.problems.length) return { ok: false, status: 0, error: b.problems.some((p) => p.startsWith(BRIDGE_KEY_ENV)) ? "bridge_key_invalid" : "bridge_not_configured" };
+  if (signal?.aborted) return { ok: false, status: 0, error: "aborted" };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  // The caller's abort (the host cancelled the tool call) ends the request at once.
+  const onAbort = () => ctrl.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const res = await fetch(bridgeUrl(b.url as string, path), {
       method,
@@ -93,9 +140,11 @@ async function call(b: BridgeConfig, method: "GET" | "POST" | "DELETE", path: st
     }
     return { ok: true, status: res.status, body: parsed };
   } catch (e) {
+    if (signal?.aborted) return { ok: false, status: 0, error: "aborted" };
     return { ok: false, status: 0, error: webhookErrorCode(e) === "webhook_timeout" ? "bridge_timeout" : "bridge_network_error" };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -124,33 +173,77 @@ export async function cancelReply(b: BridgeConfig, requestId: string): Promise<b
 
 export type Reply = { content: string; at?: string };
 export type WaitResult =
-  | { ok: true; requestId: string; state: string; replies: Reply[]; waitedSec: number }
-  | { ok: false; requestId: string; error: BridgeErrorCode; status: number; detail?: string; waitedSec: number };
+  | { ok: true; requestId: string; state: string; replies: Reply[]; waitedSec: number; createdAt?: string; expiresAt?: string }
+  | { ok: false; requestId: string; error: BridgeErrorCode; status: number; detail?: string; waitedSec: number; seen?: boolean; expiresAt?: string };
 
 /**
  * Long-poll the bridge until the first reply, the reply route expires, or timeoutSec.
  * ok:true with replies:[] means nothing arrived in time (state says why).
  */
-export async function waitReply(b: BridgeConfig, requestId: string, timeoutSec: number, pollSec = POLL_SEC): Promise<WaitResult> {
+export type WaitTick = { requestId: string; state: string; waitedSec: number; elapsedSec?: number };
+
+/** Progress is sent at most this often, even when the bridge answers at once (busy, or long-poll off). */
+export const progressTiming = { everySec: POLL_SEC };
+
+/** Sleep that ends early when the signal aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted || ms <= 0) return resolve();
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/** Final states a bridge read can report (0.2.3+ keeps a short tombstone for expired / cancelled). */
+const FINAL_STATES = new Set(["expired", "cancelled", "failed"]);
+
+export async function waitReply(
+  b: BridgeConfig,
+  requestId: string,
+  timeoutSec: number,
+  opts: { pollSec?: number; onTick?: (t: WaitTick) => void | Promise<void>; signal?: AbortSignal } = {},
+): Promise<WaitResult> {
+  const pollSec = opts.pollSec ?? POLL_SEC;
+  const signal = opts.signal;
+  let lastTick = -Infinity;
+  let seen = false;
   const start = Date.now();
   const deadline = start + Math.max(0, timeoutSec) * 1000;
   const waited = () => Math.round((Date.now() - start) / 1000);
   let state = "unknown";
+  let createdAt: string | undefined;
+  let expiresAt: string | undefined;
   for (;;) {
+    if (signal?.aborted) return { ok: false, requestId, error: "aborted", status: 0, waitedSec: waited() };
     const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
     const w = Math.min(pollSec, remaining);
     const t0 = Date.now();
-    const r = await call(b, "GET", `/grokbuild/requests/${encodeURIComponent(requestId)}?waitSec=${w}`, undefined, (w + 10) * 1000);
-    if (!r.ok) return { ok: false, requestId, error: r.error, status: r.status, detail: r.detail, waitedSec: waited() };
+    const r = await call(b, "GET", `/grokbuild/requests/${encodeURIComponent(requestId)}?waitSec=${w}`, undefined, (w + 10) * 1000, signal);
+    if (!r.ok) return { ok: false, requestId, error: r.error, status: r.status, detail: r.detail, waitedSec: waited(), seen, ...(expiresAt ? { expiresAt } : {}) };
+    seen = true;
+    if (signal?.aborted) return { ok: false, requestId, error: "aborted", status: 0, waitedSec: waited() };
     state = typeof r.body.state === "string" ? r.body.state : "unknown";
+    if (typeof r.body.createdAt === "string") createdAt = r.body.createdAt;
+    if (typeof r.body.expiresAt === "string") expiresAt = r.body.expiresAt;
+    const extra = { ...(createdAt ? { createdAt } : {}), ...(expiresAt ? { expiresAt } : {}) };
     const replies = Array.isArray(r.body.replies)
       ? (r.body.replies as unknown[])
           .filter((x): x is { content: string; at?: unknown } => typeof (x as { content?: unknown })?.content === "string")
           .map((x) => ({ content: x.content, at: typeof x.at === "string" ? x.at : undefined }))
       : [];
-    if (replies.length) return { ok: true, requestId, state, replies, waitedSec: waited() };
-    if (state === "expired" || state === "failed" || Date.now() >= deadline) return { ok: true, requestId, state, replies: [], waitedSec: waited() };
+    if (replies.length) return { ok: true, requestId, state, replies, waitedSec: waited(), ...extra };
+    if (FINAL_STATES.has(state) || Date.now() >= deadline) return { ok: true, requestId, state, replies: [], waitedSec: waited(), ...extra };
+    if (opts.onTick && Date.now() - lastTick >= progressTiming.everySec * 1000) {
+      lastTick = Date.now();
+      const created = createdAt ? Date.parse(createdAt) : NaN;
+      await opts.onTick({ requestId, state, waitedSec: waited(), ...(Number.isFinite(created) ? { elapsedSec: Math.round((Date.now() - created) / 1000) } : {}) });
+    }
     // A bridge with long-poll off (maxWaitSec 0) answers at once: poll every 2 s instead of spinning.
-    if (Date.now() - t0 < 1000) await new Promise((res) => setTimeout(res, Math.min(2000, Math.max(0, deadline - Date.now()))));
+    if (Date.now() - t0 < 1000) await sleep(Math.min(2000, Math.max(0, deadline - Date.now())), signal);
   }
 }
