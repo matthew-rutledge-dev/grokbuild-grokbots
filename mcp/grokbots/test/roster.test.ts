@@ -116,7 +116,7 @@ test("roster values that may be keys are never echoed (invalid name, bad keyEnv,
 });
 
 test("read-only listing hides write tools; write tools require confirm in schema", () => {
-  assert.deepEqual(listTools(true).map((t) => t.name), ["list_bots", "check_bot", "describe_boundary"]);
+  assert.deepEqual(listTools(true).map((t) => t.name), ["list_bots", "check_bot", "describe_boundary", "wait_reply"]);
   for (const t of listTools(false).filter((t) => ["wake_bot", "send_prompt"].includes(t.name))) {
     assert.ok("confirm" in (t.inputSchema.properties as Record<string, unknown>));
   }

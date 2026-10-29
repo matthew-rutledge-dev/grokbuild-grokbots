@@ -16,7 +16,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const pkgDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = path.join(pkgDir, "dist", "index.js");
 const KEY = "placeholder-key-11111111";
-const ALL = ["check_bot", "describe_boundary", "list_bots", "send_prompt", "wake_bot"];
+const ALL = ["check_bot", "describe_boundary", "list_bots", "send_prompt", "wait_reply", "wake_bot"];
 
 type Hit = { headers: http.IncomingHttpHeaders; body: Record<string, unknown> };
 
@@ -40,7 +40,7 @@ async function mockRoutine(): Promise<{ url: string; hits: Hit[]; close: () => P
 async function connect(extraEnv: Record<string, string>) {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (typeof v === "string" && !k.startsWith("GROKBOTS_")) env[k] = v;
-  for (const k of ["GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_READ_ONLY", "GROKBOTS_SENDER", "GROKBOTS_DEFAULT_BOT"]) {
+  for (const k of ["GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_READ_ONLY", "GROKBOTS_SENDER", "GROKBOTS_DEFAULT_BOT", "GROKBOTS_BRIDGE_URL", "GROKBOTS_BRIDGE_KEY"]) {
     env[k] = "${" + k + "}";
   }
   Object.assign(env, extraEnv);
@@ -56,7 +56,7 @@ function json(res: unknown): Record<string, unknown> {
   return JSON.parse((res as { content: Array<{ text: string }> }).content[0].text);
 }
 
-test("stdio: 5 tools; dry-run sends nothing; confirm=true POSTs once with both key headers", async () => {
+test("stdio: 6 tools; dry-run sends nothing; confirm=true POSTs once with both key headers", async () => {
   const mock = await mockRoutine();
   const client = await connect({ GROKBOTS_WEBHOOK_URL: mock.url, GROKBOTS_WEBHOOK_KEY: KEY, GROKBOTS_DEFAULT_BOT: "example-agent" });
   try {
@@ -202,7 +202,7 @@ test("stdio: GROKBOTS_READ_ONLY=enabled hides and refuses writes with one warnin
   const mock = await mockRoutine();
   const client = await connect({ GROKBOTS_WEBHOOK_URL: mock.url, GROKBOTS_WEBHOOK_KEY: KEY, GROKBOTS_READ_ONLY: "enabled" });
   try {
-    assert.deepEqual((await client.listTools()).tools.map((t) => t.name).sort(), ["check_bot", "describe_boundary", "list_bots"]);
+    assert.deepEqual((await client.listTools()).tools.map((t) => t.name).sort(), ["check_bot", "describe_boundary", "list_bots", "wait_reply"]);
     const r = json(await client.callTool({ name: "wake_bot", arguments: { confirm: true } }));
     assert.equal(r.readOnly, true);
     assert.equal(mock.hits.length, 0);
