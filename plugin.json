@@ -1,7 +1,7 @@
 {
   "name": "grokbuild-grokbots",
   "displayName": "GrokBuild to Grok Bots",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Let Grok Build (or Cursor) wake a Grok Bot or send it a prompt through the bot's own webhook-triggered routine. One grokbots MCP server with a roster, confirm-gated sends and an optional read-only mode, plus setup skills. Each installer uses their own routine URL and key.",
   "author": {
     "name": "Matthew Rutledge"
@@ -78,7 +78,7 @@
       "GROKBOTS_WAIT_MAX_SEC": {
         "type": "string",
         "title": "untilReply budget (seconds)",
-        "description": "Optional. How long one untilReply call may keep waiting while the host receives progress notifications (default 300, 30-3600)."
+        "description": "Optional. How long one untilReply call may keep waiting, with or without progress notifications (default 300, 30-3600)."
       }
     },
     "required": []

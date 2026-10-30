@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.9
+
+- **Fix: `untilReply` blocks without a `progressToken`.** Headless hosts send no progress token, and `send_prompt(confirm: true, untilReply: true)` returned at once with no `waitResult`: the send only waited with `wait: true`, and the wait loop ran past one check-in only when the host asked for progress. Now `untilReply` or `timeoutSec` on `send_prompt` asks for a wait (unless `wait: false`), and `untilReply` polls in check-ins until `replied` / `expired` / `cancelled` / host abort or `GROKBOTS_WAIT_MAX_SEC` (or `timeoutSec` if larger), with or without a token. Progress notifications are still sent when a token is present. The `untilReply: "limited: …"` note is gone.
+- A requested wait always returns `waitResult`: `awaiting_reply` / `aborted` (`done: false`, `next: wait_reply`), `not_sent` when the routine refused the prompt (route cancelled), `send_unconfirmed` when the send could not be confirmed (route kept). Abort still stops polling and keeps the route.
+- Docs: README, `grokbots-send`, tool schema text and the `GROKBOTS_WAIT_MAX_SEC` manifest description no longer say waiting needs a `progressToken`.
+- Tests: stdio `send_prompt untilReply` with no `progressToken` against a fake bridge whose reply lands after ~3 s returns `replied` / `pong` (fails on 0.1.8: no `waitResult`); `waitResult` on timeout, abort and refused send; `wait: false` wins (46 tests).
+- Bump manifests, MCP package and `VERSION` to `0.1.9`.
+
 ## 0.1.8
 
 - Test: aborting an `untilReply` wait over stdio must also end the in-flight bridge long-poll (the bridge sees the connection close within 3 s, no new read). It fails if only the fetch-level abort link in `call()` is dropped, which the earlier tests did not catch (44 tests).

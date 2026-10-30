@@ -47,7 +47,7 @@ const timeoutArg = {
   },
   untilReply: {
     type: "boolean",
-    description: "Keep waiting inside this one call, sending progress updates, until the reply or GROKBOTS_WAIT_MAX_SEC (default 300 s). Only when the host asked for progress (progressToken); otherwise it waits one check-in.",
+    description: "Keep waiting inside this one call until the reply (or expired / cancelled / host abort), up to GROKBOTS_WAIT_MAX_SEC (default 300 s) or timeoutSec if larger. Works with or without MCP progress; if the host sent a progressToken it also gets progress updates. On send_prompt it implies wait. If the host may cut the call sooner, prefer wait_reply check-ins.",
   },
 };
 
@@ -121,7 +121,7 @@ const ALL_TOOLS = [
           type: "boolean",
           description: "Ask the bridge for a one-time reply route (default true when GROKBOTS_BRIDGE_URL is set; false sends one-way).",
         },
-        wait: { type: "boolean", description: "After a confirmed send, check in once for the reply (needs the bridge; timeoutSec is the check-in interval). No reply yet = waitResult.state \"awaiting_reply\": keep calling wait_reply. Default false: use wait_reply later." },
+        wait: { type: "boolean", description: "After a confirmed send, wait for the reply in this call and return it as waitResult (needs the bridge). timeoutSec is the wait; untilReply waits longer. Implied by untilReply or timeoutSec unless wait is false. No reply yet = waitResult.state \"awaiting_reply\": keep calling wait_reply. Default false: use wait_reply later." },
         ...timeoutArg,
         ...confirmArg,
       },
@@ -152,10 +152,13 @@ function timeoutOf(args: Record<string, unknown>): number {
 
 type WaitOpts = { timeoutSec: number; untilReply: boolean };
 
-/** One wait_reply call: a check-in, or (untilReply + host progress) a longer wait with progress updates. */
+/**
+ * One wait: a check-in of timeoutSec, or with untilReply a longer blocking wait (up to
+ * GROKBOTS_WAIT_MAX_SEC). Progress is an extra: sent when the host gave a progressToken,
+ * never a condition for waiting. The host's abort signal ends it at once.
+ */
 async function runWait(bridge: BridgeConfig, requestId: string, o: WaitOpts, progress?: ProgressFn, signal?: AbortSignal) {
-  const keepGoing = o.untilReply && Boolean(progress);
-  const budget = keepGoing ? Math.max(o.timeoutSec, untilReplySec()) : o.timeoutSec;
+  const budget = o.untilReply ? Math.max(o.timeoutSec, untilReplySec()) : o.timeoutSec;
   const w = await waitReply(bridge, requestId, budget, {
     signal,
     onTick: progress
@@ -165,11 +168,7 @@ async function runWait(bridge: BridgeConfig, requestId: string, o: WaitOpts, pro
         }
       : undefined,
   });
-  const body = waitBody(w);
-  if (o.untilReply && !progress && body.state === "awaiting_reply") {
-    return { ...body, untilReply: "limited: the host asked for no progress updates (no progressToken), so this call waited one check-in only" };
-  }
-  return body;
+  return waitBody(w);
 }
 
 const NEXT_STEP =
@@ -192,7 +191,7 @@ function waitBody(w: WaitResult) {
   if (w.ok) rememberRoute(w.requestId, { expiresAt: w.expiresAt, seen: true });
   if (!w.ok) {
     if (w.error === "aborted") {
-      return { ok: false, done: false, requestId: w.requestId, state: "aborted", checkedForSec: w.waitedSec, note: "The host cancelled this wait. The reply route stays open; call wait_reply again to resume." };
+      return { ok: false, done: false, requestId: w.requestId, state: "aborted", checkedForSec: w.waitedSec, next: { tool: "wait_reply", arguments: { requestId: w.requestId } }, note: "The host cancelled this wait. The reply route stays open; call wait_reply again to resume." };
     }
     if (w.error === "bridge_http_404") {
       const k = known.get(w.requestId);
@@ -345,7 +344,21 @@ async function deliver(
     replyInfo = { ...replyInfo, expected: false, cancelled: await cancelReply(bridge, String(payload.requestId)) };
   }
   let waited: Record<string, unknown> | undefined;
-  if (accepted && replyInfo && replyOpts?.wait) waited = await runWait(bridge, String(payload.requestId), replyOpts, progress, signal);
+  if (replyInfo && replyOpts?.wait) {
+    const requestId = String(payload.requestId);
+    if (accepted) waited = await runWait(bridge, requestId, replyOpts, progress, signal);
+    else if (res.sent === "unknown" || res.error === "webhook_response_read_failed") {
+      // The routine may have it: no wait here, but the route is kept for a later wait_reply.
+      waited = {
+        ok: false,
+        done: false,
+        requestId,
+        state: "send_unconfirmed",
+        next: { tool: "wait_reply", arguments: { requestId } },
+        note: "The webhook send was not confirmed, so this call did not wait. The reply route is kept: call wait_reply with this requestId to see if the bot answers.",
+      };
+    } else waited = { ok: false, done: true, requestId, state: "not_sent", note: "The routine did not take the prompt, so there is nothing to wait for (the reply route was cancelled)." };
+  }
   return jsonResult(
     {
       ok: accepted,
@@ -441,14 +454,16 @@ export async function handleTool(
       if (replyHint) payload.replyHint = replyHint;
       const bridge = loadBridge();
       const expect = typeof args.expectReply === "boolean" ? args.expectReply : bridge.configured;
-      if (args.wait === true && !expect) {
-        return jsonResult({ ok: false, sent: false, error: "wait=true needs a reply route: set GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY and leave expectReply on. Nothing sent." }, true);
+      // untilReply or timeoutSec ask for a wait too (unless wait is explicitly false).
+      const wantWait = args.wait === true || (args.wait !== false && (args.untilReply === true || typeof args.timeoutSec === "number"));
+      if (wantWait && !expect) {
+        return jsonResult({ ok: false, sent: false, error: "Waiting (wait, untilReply or timeoutSec) needs a reply route: set GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY and leave expectReply on. Nothing sent." }, true);
       }
       return deliver(
         p.bot,
         payload,
         args.confirm === true,
-        { expectReply: expect, wait: args.wait === true, timeoutSec: timeoutOf(args), untilReply: args.untilReply === true },
+        { expectReply: expect, wait: wantWait, timeoutSec: timeoutOf(args), untilReply: args.untilReply === true },
         ctx.progress,
         ctx.signal,
       );

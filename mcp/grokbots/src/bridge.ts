@@ -27,7 +27,7 @@ export const WAIT_MAX_SEC_ENV = "GROKBOTS_WAIT_MAX_SEC";
 export const DEFAULT_WAIT_SEC = 45;
 /** Largest per-call wait a caller may ask for (only for hosts known to allow long tool calls). */
 export const MAX_WAIT_SEC = 600;
-/** untilReply with host progress notifications: how long one call may keep going (default / hard cap). */
+/** untilReply: how long one call may keep waiting, with or without progress notifications (default / hard cap). */
 export const DEFAULT_UNTIL_REPLY_SEC = 300;
 export const MAX_UNTIL_REPLY_SEC = 3600;
 
@@ -42,7 +42,7 @@ export function checkInSec(env: NodeJS.ProcessEnv = process.env): number {
   return intEnv(WAIT_SEC_ENV, env, DEFAULT_WAIT_SEC, 5, MAX_WAIT_SEC);
 }
 
-/** untilReply budget for one call when the host sends progress: GROKBOTS_WAIT_MAX_SEC (30-3600), default 300. */
+/** untilReply budget for one call: GROKBOTS_WAIT_MAX_SEC (30-3600), default 300. */
 export function untilReplySec(env: NodeJS.ProcessEnv = process.env): number {
   return intEnv(WAIT_MAX_SEC_ENV, env, DEFAULT_UNTIL_REPLY_SEC, 30, MAX_UNTIL_REPLY_SEC);
 }

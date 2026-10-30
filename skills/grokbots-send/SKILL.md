@@ -35,7 +35,7 @@ The `grokbots` MCP server POSTs once to a Grok Bot's **webhook-triggered routine
    - `state: "config_error"`, `done: true`: the bridge refused `GROKBOTS_BRIDGE_KEY`. Tell the user to fix it; don't retry.
    - `state: "aborted"`: the host cancelled the call. The route is still open; call `wait_reply` again when you want to resume. If the send itself failed, the plugin already cancelled the route (`reply.expected: false`, `reply.cancelled`); don't wait for it.
    - `bridge_timeout` / `bridge_network_error` (`done: false`): the bridge was unreachable on this check. The reply is kept there; try again shortly.
-   - `untilReply: true` waits longer inside one call with progress updates when the host supports MCP progress. If the result says `untilReply: "limited: …"`, just keep calling `wait_reply`.
+   - `untilReply: true` blocks inside one call until the reply or a final state (up to `GROKBOTS_WAIT_MAX_SEC`, default 300 s), with or without MCP progress; progress updates are added only when the host asks for them. On `send_prompt` it implies `wait: true` and the result always has `waitResult` (`not_sent` = the routine refused it; `send_unconfirmed` = check later with `wait_reply`). If the host cuts the call first (`aborted`) or the budget ends (`awaiting_reply`), keep calling `wait_reply`.
 
 ## Rules
 
