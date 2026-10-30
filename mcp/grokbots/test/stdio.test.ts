@@ -329,8 +329,11 @@ test("stdio: abort also ends the in-flight bridge long-poll (fetch is aborted, n
   }
 });
 
-test("stdio: send_prompt untilReply blocks without a progressToken and returns the reply", async () => {
-  const BKEY = "placeholder-bridge-client-22222222";
+const BKEY = "placeholder-bridge-client-22222222";
+
+/** A routine + reply bridge on one loopback server: the woken bot answers "pong" replyAfterMs after the webhook. */
+async function replyServer(replyAfterMs: number) {
+  let posts = 0;
   const recs = new Map<string, { token: string; created: number; replies: { content: string; at: string }[]; waiters: (() => void)[] }>();
   let base = "";
   const srv = http.createServer((req, res) => {
@@ -341,12 +344,13 @@ test("stdio: send_prompt untilReply blocks without a progressToken and returns t
       const body = raw ? JSON.parse(raw) : {};
       const send = (status: number, b: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(b));
       if (url.pathname === "/automations/webhook/11111111") {
+        posts += 1;
         // the routine: accept, then the woken bot answers on reply.url about 3 s later
         send(200, { success: true, runUuid: "00000000-0000-0000-0000-000000000000" });
         const r = body.reply;
         setTimeout(() => {
           void fetch(r.url, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${r.token}` }, body: JSON.stringify({ requestId: r.requestId, content: "pong" }) });
-        }, 3000);
+        }, replyAfterMs);
         return;
       }
       if (url.pathname === "/grokbuild/expect" && req.headers.authorization === `Bearer ${BKEY}`) {
@@ -384,13 +388,20 @@ test("stdio: send_prompt untilReply blocks without a progressToken and returns t
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
   base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
-  const client = await connect({
-    GROKBOTS_WEBHOOK_URL: `${base}/automations/webhook/11111111`,
-    GROKBOTS_WEBHOOK_KEY: KEY,
-    GROKBOTS_BRIDGE_URL: base,
-    GROKBOTS_BRIDGE_KEY: BKEY,
-    GROKBOTS_WAIT_SEC: "5",
-  });
+  return {
+    base,
+    posts: () => posts,
+    env: { GROKBOTS_WEBHOOK_URL: `${base}/automations/webhook/11111111`, GROKBOTS_WEBHOOK_KEY: KEY, GROKBOTS_BRIDGE_URL: base, GROKBOTS_BRIDGE_KEY: BKEY, GROKBOTS_WAIT_SEC: "5" },
+    close: async () => {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    },
+  };
+}
+
+test("stdio: send_prompt untilReply blocks without a progressToken and returns the reply", async () => {
+  const fake = await replyServer(3000);
+  const client = await connect(fake.env);
   try {
     // no onprogress: the SDK sends no progressToken, like a headless host
     const t0 = Date.now();
@@ -402,7 +413,31 @@ test("stdio: send_prompt untilReply blocks without a progressToken and returns t
     assert.equal(typeof w.checkedForSec, "number");
   } finally {
     await client.close();
-    srv.closeAllConnections();
-    await new Promise<void>((r) => srv.close(() => r()));
+    await fake.close();
+  }
+});
+
+test("stdio: host timeout during send_prompt untilReply: the caller's requestId resumes with wait_reply, no resend", async () => {
+  const fake = await replyServer(4000);
+  const client = await connect(fake.env);
+  try {
+    const requestId = "caller-0000-timeout";
+    // a 1.5 s client timeout: the webhook fires, the host gives up before the reply
+    await assert.rejects(
+      client.callTool({ name: "send_prompt", arguments: { prompt: "ping", confirm: true, untilReply: true, requestId } }, undefined, { timeout: 1500 }),
+      /timed out/i,
+    );
+    assert.equal(fake.posts(), 1, "the webhook fired once");
+    assert.match(client.stderrText(), new RegExp(`requestId ${requestId}`), "the id is in the server log");
+    assert.doesNotMatch(client.stderrText(), new RegExp(KEY), "no key in the log");
+    // don't resend: a resend is refused, and wait_reply with the same id gets the reply
+    const again = json(await client.callTool({ name: "send_prompt", arguments: { prompt: "ping", confirm: true, requestId } }));
+    assert.equal(again.errorCode, "request_id_in_use");
+    const w = json(await client.callTool({ name: "wait_reply", arguments: { requestId, untilReply: true } }));
+    assert.deepEqual([w.state, w.done, (w.replies as any[])[0].content], ["replied", true, "pong"]);
+    assert.equal(fake.posts(), 1, "still one bot run");
+  } finally {
+    await client.close();
+    await fake.close();
   }
 });

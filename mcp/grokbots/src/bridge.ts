@@ -206,11 +206,11 @@ export async function waitReply(
   b: BridgeConfig,
   requestId: string,
   timeoutSec: number,
-  opts: { pollSec?: number; onTick?: (t: WaitTick) => void | Promise<void>; signal?: AbortSignal } = {},
+  opts: { pollSec?: number; onTick?: (t: WaitTick) => void | Promise<void>; signal?: AbortSignal; lastTickAt?: number } = {},
 ): Promise<WaitResult> {
   const pollSec = opts.pollSec ?? POLL_SEC;
   const signal = opts.signal;
-  let lastTick = -Infinity;
+  let lastTick = opts.lastTickAt ?? -Infinity; // the caller may have just sent one
   let seen = false;
   const start = Date.now();
   const deadline = start + Math.max(0, timeoutSec) * 1000;
