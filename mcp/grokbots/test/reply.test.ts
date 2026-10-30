@@ -48,6 +48,7 @@ async function fakeBridge(opts: { expectStatus?: number; prefix?: string; maxWai
     if (url.pathname === "/grokbuild/expect") {
       if (!client) return send(401, { ok: false, error: "unauthorized" });
       if (opts.expectStatus) return send(opts.expectStatus, { ok: false, error: "read_only" });
+      if (recs.has(body.requestId)) return send(409, { ok: false, error: "duplicate requestId" }); // like the real bridge
       const token = crypto.randomBytes(32).toString("base64url");
       recs.set(body.requestId, { token, created: Date.now(), expires: Date.now() + 60_000, replies: [], waiters: [] });
       return send(201, { ok: true, requestId: body.requestId, replyUrl: `${base}${opts.prefix ?? ""}/grokbuild/reply`, replyToken: token, expiresAt: new Date(Date.now() + 60_000).toISOString() });
@@ -275,7 +276,9 @@ test("webhook refused after /expect: the reply route is cancelled (best effort)"
       const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: true, timeoutSec: 5 }, ro));
       assert.equal(r.ok, false);
       assert.deepEqual([r.reply.expected, r.reply.cancelled], [false, true]);
-      assert.equal(r.waitResult, undefined, "no wait after a refused send");
+      // a wait was asked for, so waitResult is there, final, and nothing was waited on
+      assert.deepEqual([r.waitResult.state, r.waitResult.done], ["not_sent", true]);
+      assert.equal(bridge.seen.filter((x) => x.method === "GET").length, 0, "no wait after a refused send");
       const del = bridge.seen.find((x) => x.method === "DELETE");
       assert.equal(del?.path, `/grokbuild/requests/${r.requestId}`);
       assert.equal(del?.auth, `Bearer ${BRIDGE_KEY}`);
@@ -338,7 +341,7 @@ test("heartbeat: no reply yet is awaiting_reply (not an error) with elapsed time
   }
 });
 
-test("untilReply: with host progress it keeps waiting past the check-in and reports progress; without, one check-in", async () => {
+test("untilReply: keeps waiting past the check-in with or without host progress; progress only when asked", async () => {
   const bridge = await fakeBridge({ maxWait: 1 });
   const routine = await fakeRoutine("slow answer", 3500);
   try {
@@ -350,16 +353,51 @@ test("untilReply: with host progress it keeps waiting past the check-in and repo
     const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: true, untilReply: true, timeoutSec: 1 }, ctx as never));
     assert.deepEqual([r.waitResult.state, r.waitResult.replies[0].content], ["replied", "slow answer"]);
     assert.ok(ticks.length >= 2, `progress updates sent (${ticks.length})`);
-    assert.match(ticks[0].m, /^still waiting, \d+ s for /);
+    assert.match(ticks[0].m, new RegExp(`^sent to example-agent, requestId ${r.requestId}: waiting`), "first update names the requestId");
+    assert.match(ticks[1].m, /^still waiting, \d+ s for /);
     assert.ok(ticks.every((t, i) => i === 0 || t.n >= ticks[i - 1].n), "progress never goes down");
-    // no progressToken: untilReply is limited to one check-in and says so
+    // no progressToken: untilReply still blocks past the 1 s check-in until the reply lands
     const id = "pending-0002";
-    bridge.recs.set(id, { created: Date.now(), expires: Date.now() + 60_000, replies: [], waiters: [] });
-    const lim = out(await handleTool("wait_reply", { requestId: id, untilReply: true, timeoutSec: 1 }, ro));
-    assert.equal(lim.state, "awaiting_reply");
-    assert.match(lim.untilReply, /^limited/);
+    const rec = { created: Date.now(), expires: Date.now() + 60_000, replies: [] as { content: string; at: string }[], waiters: [] as (() => void)[] };
+    bridge.recs.set(id, rec);
+    setTimeout(() => {
+      rec.replies.push({ content: "late pong", at: new Date().toISOString() });
+      for (const w of rec.waiters.splice(0)) w();
+    }, 2500);
+    const t0 = Date.now();
+    const w = out(await handleTool("wait_reply", { requestId: id, untilReply: true, timeoutSec: 1 }, ro));
+    assert.deepEqual([w.state, w.done, w.replies[0].content], ["replied", true, "late pong"]);
+    assert.ok(Date.now() - t0 >= 2000, "blocked past the check-in");
+    assert.equal(w.untilReply, undefined, "no 'limited' note any more");
   } finally {
     progressTiming.everySec = 25;
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("a requested wait always returns waitResult: timeout -> awaiting_reply, host abort -> aborted, both with the wait_reply hint", async () => {
+  const bridge = await fakeBridge({ maxWait: 1 });
+  const routine = await fakeRoutine(undefined);
+  try {
+    env(routine.url, bridge.url);
+    process.env.GROKBOTS_WAIT_MAX_SEC = "30";
+    // timeoutSec alone asks for a wait (no wait:true, no progressToken)
+    const t = out(await handleTool("send_prompt", { prompt: "x", confirm: true, timeoutSec: 2 }, ro));
+    assert.deepEqual([t.ok, t.waitResult?.state, t.waitResult?.done, t.waitResult?.next?.tool], [true, "awaiting_reply", false, "wait_reply"]);
+    assert.ok(t.waitResult.checkedForSec >= 1);
+    // untilReply without progress keeps polling until the host aborts the call
+    const before = bridge.seen.filter((x) => x.method === "GET").length;
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 2500);
+    const u = out(await handleTool("send_prompt", { prompt: "x", confirm: true, untilReply: true, timeoutSec: 1 }, { ...ro, signal: ac.signal } as never));
+    assert.deepEqual([u.ok, u.waitResult?.state, u.waitResult?.done, u.waitResult?.next?.tool], [true, "aborted", false, "wait_reply"]);
+    assert.ok(bridge.seen.filter((x) => x.method === "GET").length - before >= 2, "polled past one 1 s check-in");
+    assert.ok(bridge.recs.has(u.requestId), "abort keeps the route");
+    // wait:false wins over untilReply / timeoutSec
+    const n = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: false, untilReply: true }, ro));
+    assert.equal(n.waitResult, undefined);
+  } finally {
     await routine.close();
     await bridge.close();
   }
@@ -478,4 +516,48 @@ test("check-in and untilReply settings: env parsing and labels", () => {
   assert.equal(waitingFor(185), "still waiting, 3 min");
   assert.equal(waitingFor(3 * 3600 + 20 * 60), "still waiting, 3 h 20 min");
   assert.equal(waitingFor(7200), "still waiting, 2 h");
+});
+
+test("send_prompt requestId: caller-supplied id is used, validated, and never sent twice (here or on the bridge)", async () => {
+  const bridge = await fakeBridge({ maxWait: 1 });
+  const routine = await fakeRoutine(undefined);
+  try {
+    env(routine.url, bridge.url);
+    const bad = out(await handleTool("send_prompt", { prompt: "x", confirm: true, requestId: "no spaces!" }, ro));
+    assert.deepEqual([bad.ok, bad.sent], [false, false]);
+    assert.match(bad.error, /8-64/);
+    const id = "caller-id-0001";
+    const dry = out(await handleTool("send_prompt", { prompt: "x", requestId: id }, ro));
+    assert.equal(dry.dryRun, true);
+    const first = out(await handleTool("send_prompt", { prompt: "x", confirm: true, requestId: id }, ro));
+    assert.deepEqual([first.ok, first.requestId, routine.hits[0].body.requestId], [true, id, id]);
+    // resend after (say) a host timeout: refused, the bot is not run twice
+    const again = out(await handleTool("send_prompt", { prompt: "x", confirm: true, requestId: id, untilReply: true }, ro));
+    assert.deepEqual([again.ok, again.sent, again.errorCode, again.next?.tool], [false, false, "request_id_in_use", "wait_reply"]);
+    // an id the bridge still has open (sent by another process): the bridge's 409 is refused the same way
+    bridge.recs.set("other-proc-0001", { created: Date.now(), expires: Date.now() + 60_000, replies: [], waiters: [] });
+    const other = out(await handleTool("send_prompt", { prompt: "x", confirm: true, requestId: "other-proc-0001" }, ro));
+    assert.deepEqual([other.ok, other.sent, other.errorCode, other.httpStatus], [false, false, "request_id_in_use", 409]);
+    assert.equal(routine.hits.length, 1, "one webhook POST in total");
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
+});
+
+test("send_unconfirmed: webhook connection dies after the POST -> waitResult done:false, next wait_reply; no read, no cancel", async () => {
+  const bridge = await fakeBridge({ maxWait: 1 });
+  const routine = await fakeRoutine(undefined, 0, 200, true, true);
+  try {
+    env(routine.url, bridge.url);
+    const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, untilReply: true }, ro));
+    assert.equal(r.sent, "unknown");
+    assert.deepEqual([r.waitResult.state, r.waitResult.done, r.waitResult.next?.tool, r.waitResult.next?.arguments?.requestId], ["send_unconfirmed", false, "wait_reply", r.requestId]);
+    assert.equal(bridge.seen.filter((x) => x.method === "GET").length, 0, "no read");
+    assert.equal(bridge.seen.filter((x) => x.method === "DELETE").length, 0, "no cancel");
+    assert.ok(bridge.recs.has(r.requestId), "route kept");
+  } finally {
+    await routine.close();
+    await bridge.close();
+  }
 });

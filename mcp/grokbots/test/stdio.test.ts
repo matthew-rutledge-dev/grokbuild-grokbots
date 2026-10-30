@@ -328,3 +328,116 @@ test("stdio: abort also ends the in-flight bridge long-poll (fetch is aborted, n
     await new Promise<void>((r) => srv.close(() => r()));
   }
 });
+
+const BKEY = "placeholder-bridge-client-22222222";
+
+/** A routine + reply bridge on one loopback server: the woken bot answers "pong" replyAfterMs after the webhook. */
+async function replyServer(replyAfterMs: number) {
+  let posts = 0;
+  const recs = new Map<string, { token: string; created: number; replies: { content: string; at: string }[]; waiters: (() => void)[] }>();
+  let base = "";
+  const srv = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (d) => (raw += d));
+    req.on("end", () => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const body = raw ? JSON.parse(raw) : {};
+      const send = (status: number, b: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(b));
+      if (url.pathname === "/automations/webhook/11111111") {
+        posts += 1;
+        // the routine: accept, then the woken bot answers on reply.url about 3 s later
+        send(200, { success: true, runUuid: "00000000-0000-0000-0000-000000000000" });
+        const r = body.reply;
+        setTimeout(() => {
+          void fetch(r.url, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${r.token}` }, body: JSON.stringify({ requestId: r.requestId, content: "pong" }) });
+        }, replyAfterMs);
+        return;
+      }
+      if (url.pathname === "/grokbuild/expect" && req.headers.authorization === `Bearer ${BKEY}`) {
+        const token = "reply-token-placeholder-0000000000000000000";
+        recs.set(body.requestId, { token, created: Date.now(), replies: [], waiters: [] });
+        return send(201, { ok: true, requestId: body.requestId, replyUrl: `${base}/grokbuild/reply`, replyToken: token, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      }
+      if (url.pathname === "/grokbuild/reply") {
+        const r = recs.get(body.requestId);
+        if (!r || req.headers.authorization !== `Bearer ${r.token}`) return send(401, { ok: false });
+        r.replies.push({ content: body.content, at: new Date().toISOString() });
+        for (const w of r.waiters.splice(0)) w();
+        return send(200, { ok: true });
+      }
+      const m = /^\/grokbuild\/requests\/([^/]+)$/.exec(url.pathname);
+      if (m && req.headers.authorization === `Bearer ${BKEY}`) {
+        const r = recs.get(m[1]);
+        if (!r) return send(404, { ok: false, error: "not_found" });
+        const reply = () =>
+          send(200, { ok: true, requestId: m[1], state: r.replies.length ? "replied" : "awaiting_reply", replies: r.replies, createdAt: new Date(r.created).toISOString() });
+        const wait = Math.min(Number(url.searchParams.get("waitSec") ?? 0), 2);
+        if (r.replies.length || wait === 0) return reply();
+        let sent = false;
+        const once = () => {
+          if (sent) return;
+          sent = true;
+          reply();
+        };
+        setTimeout(once, wait * 1000);
+        r.waiters.push(once);
+        return;
+      }
+      send(404, { ok: false });
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  return {
+    base,
+    posts: () => posts,
+    env: { GROKBOTS_WEBHOOK_URL: `${base}/automations/webhook/11111111`, GROKBOTS_WEBHOOK_KEY: KEY, GROKBOTS_BRIDGE_URL: base, GROKBOTS_BRIDGE_KEY: BKEY, GROKBOTS_WAIT_SEC: "5" },
+    close: async () => {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    },
+  };
+}
+
+test("stdio: send_prompt untilReply blocks without a progressToken and returns the reply", async () => {
+  const fake = await replyServer(3000);
+  const client = await connect(fake.env);
+  try {
+    // no onprogress: the SDK sends no progressToken, like a headless host
+    const t0 = Date.now();
+    const res = json(await client.callTool({ name: "send_prompt", arguments: { prompt: "ping", confirm: true, untilReply: true, timeoutSec: 1 } }));
+    const w = res.waitResult as Record<string, any> | undefined;
+    assert.ok(w, `waitResult present (got keys: ${Object.keys(res).join(",")})`);
+    assert.deepEqual([w.state, w.done, w.replies?.[0]?.content], ["replied", true, "pong"]);
+    assert.ok(Date.now() - t0 >= 2500, "blocked until the reply");
+    assert.equal(typeof w.checkedForSec, "number");
+  } finally {
+    await client.close();
+    await fake.close();
+  }
+});
+
+test("stdio: host timeout during send_prompt untilReply: the caller's requestId resumes with wait_reply, no resend", async () => {
+  const fake = await replyServer(4000);
+  const client = await connect(fake.env);
+  try {
+    const requestId = "caller-0000-timeout";
+    // a 1.5 s client timeout: the webhook fires, the host gives up before the reply
+    await assert.rejects(
+      client.callTool({ name: "send_prompt", arguments: { prompt: "ping", confirm: true, untilReply: true, requestId } }, undefined, { timeout: 1500 }),
+      /timed out/i,
+    );
+    assert.equal(fake.posts(), 1, "the webhook fired once");
+    assert.match(client.stderrText(), new RegExp(`requestId ${requestId}`), "the id is in the server log");
+    assert.doesNotMatch(client.stderrText(), new RegExp(KEY), "no key in the log");
+    // don't resend: a resend is refused, and wait_reply with the same id gets the reply
+    const again = json(await client.callTool({ name: "send_prompt", arguments: { prompt: "ping", confirm: true, requestId } }));
+    assert.equal(again.errorCode, "request_id_in_use");
+    const w = json(await client.callTool({ name: "wait_reply", arguments: { requestId, untilReply: true } }));
+    assert.deepEqual([w.state, w.done, (w.replies as any[])[0].content], ["replied", true, "pong"]);
+    assert.equal(fake.posts(), 1, "still one bot run");
+  } finally {
+    await client.close();
+    await fake.close();
+  }
+});

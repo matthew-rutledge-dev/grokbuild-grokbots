@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.9
+
+- **Fix: `untilReply` blocks without a `progressToken`.** Headless hosts send no progress token, and `send_prompt(confirm: true, untilReply: true)` returned at once with no `waitResult`: the send only waited with `wait: true`, and the wait loop ran past one check-in only when the host asked for progress. Now `untilReply` or `timeoutSec` on `send_prompt` asks for a wait (unless `wait: false`), and `untilReply` polls in check-ins until `replied` / `expired` / `cancelled` / host abort or `GROKBOTS_WAIT_MAX_SEC` (or `timeoutSec` if larger), with or without a token. Progress notifications are still sent when a token is present. The `untilReply: "limited: …"` note is gone.
+- A requested wait always returns `waitResult`: `awaiting_reply` / `aborted` (`done: false`, `next: wait_reply`), `not_sent` when the routine refused the prompt (route cancelled), `send_unconfirmed` when the send could not be confirmed (route kept). Abort still stops polling and keeps the route.
+- Docs: README, `grokbots-send`, tool schema text and the `GROKBOTS_WAIT_MAX_SEC` manifest description no longer say waiting needs a `progressToken`.
+- Tests: stdio `send_prompt untilReply` with no `progressToken` against a fake bridge whose reply lands after ~3 s returns `replied` / `pong` (fails on 0.1.8: no `waitResult`); `waitResult` on timeout, abort and refused send; `wait: false` wins.
+- **Caller-supplied `requestId` on `send_prompt`** (8-64 of `A-Z a-z 0-9 _ -`). A host tool-call timeout during a blocking send no longer loses the id after delivery: pass your own and resume with `wait_reply`. A reused id is refused (`request_id_in_use`, nothing sent) when this process already sent it or the bridge still has its route open (409). The first progress update after a send names the `requestId`; each confirmed send logs `grokbots: send_prompt to <bot>, requestId <id>` to stderr (no secrets). Skill, schema and README say: after a host timeout, don't resend, resume with `wait_reply`.
+- `not_sent` note no longer claims the cancel happened; it points at `reply.cancelled`.
+- Tests: host timeout (1.5 s client timeout) over stdio, then `wait_reply` with the caller's id gets the reply and a resend is refused (one bot run); requestId validation and reuse (local and bridge 409); `send_unconfirmed` (dropped webhook: `done: false`, `next: wait_reply`, no read, no cancel); first progress update names the id (49 tests). README no longer hard-codes a test count.
+- Bump manifests, MCP package and `VERSION` to `0.1.9`.
+
 ## 0.1.8
 
 - Test: aborting an `untilReply` wait over stdio must also end the in-flight bridge long-poll (the bridge sees the connection close within 3 s, no new read). It fails if only the fetch-level abort link in `call()` is dropped, which the earlier tests did not catch (44 tests).

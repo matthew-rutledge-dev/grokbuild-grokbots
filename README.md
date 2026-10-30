@@ -89,7 +89,9 @@ Part of the single source above. To get the bot's answer back into Grok Build or
 
 Why 45 s per call: MCP hosts end a tool call on their own clock, often around 60 s and sometimes sooner. If your host allows longer calls, raise `GROKBOTS_WAIT_SEC` (max 600) or pass `timeoutSec`.
 
-**`untilReply: true`** (on `wait_reply` or `send_prompt` with `wait: true`) keeps waiting inside one call, but only as long as is safe. If the host asked for progress (an MCP `progressToken`), the plugin sends a `notifications/progress` update ("still waiting, N min") at most once every 25 s. It stays throttled even when the bridge answers at once, which happens when it is busy (`maxLongPolls` reached) or has long-polling off; reads then come about every 2 s. The plugin keeps going up to `GROKBOTS_WAIT_MAX_SEC` (default 300 s, max 3600). Hosts that reset their timeout on progress then never cut it off. Without a `progressToken`, it waits one check-in only and says so (`untilReply: "limited: …"`). Either way, an `awaiting_reply` result just means: call again. `GROKBOTS_BRIDGE_URL` may include a path prefix (`https://bridge.example.com/base`); bridge paths are joined onto it.
+**`untilReply: true`** (on `wait_reply` or `send_prompt`) blocks inside one call until the reply, `expired` / `cancelled`, a host abort, or `GROKBOTS_WAIT_MAX_SEC` (default 300 s, max 3600; `timeoutSec` if larger), whether or not the host asked for progress. On `send_prompt`, `untilReply` or `timeoutSec` alone asks for a wait (as `wait: true` does) unless `wait: false` is passed, and a requested wait always returns `waitResult` (`state`, `replies`, `elapsedSec`, `checkedForSec`, `done`; `not_sent` if the routine refused the prompt, `send_unconfirmed` if the send could not be confirmed). If the host also sent an MCP `progressToken`, the plugin adds a `notifications/progress` update ("still waiting, N min") at most once every 25 s. It stays throttled even when the bridge answers at once, which happens when it is busy (`maxLongPolls` reached) or has long-polling off; reads then come about every 2 s. Hosts that reset their timeout on progress then never cut it off; hosts that don't may abort the call first (`state: "aborted"`, route kept). An `awaiting_reply` or `aborted` result just means: call `wait_reply` again.
+
+**Pass your own `requestId` when you wait in the send.** `send_prompt` takes an optional `requestId` (8-64 of `A-Z a-z 0-9 _ -`, e.g. a UUID; default a new UUID). If the host times out a blocking `send_prompt` after the webhook fired, the caller still knows the id: don't resend (a resend is a second bot run), resume with `wait_reply` using that `requestId`. A reused id is refused with `errorCode: "request_id_in_use"` and nothing is sent, whether this process sent it before or the bridge still has its route open (409). After a confirmed send the first progress update (when the host sent a `progressToken`) names the `requestId`, and each confirmed send logs one line to stderr: `grokbots: send_prompt to <bot>, requestId <id>` (no keys or tokens). `GROKBOTS_BRIDGE_URL` may include a path prefix (`https://bridge.example.com/base`); bridge paths are joined onto it.
 
 **The reply token is visible in the bot's routine run history**, because it is part of the webhook body the routine receives. That is acceptable: it works only for one reply to that one `requestId`, through `/grokbuild/reply`, until it expires (the bridge's `replyTokenTtlSec`, 6 h by default), and it grants no other access. The bridge key never leaves your computer except to the bridge.
 
@@ -107,7 +109,7 @@ Why 45 s per call: MCP hosts end a tool call on their own clock, often around 60
 | `GROKBOTS_BRIDGE_URL` | for replies | Base URL of your reply bridge (https; plain http only to loopback for tests). See [Replies](#replies-optional-bridge) |
 | `GROKBOTS_BRIDGE_KEY` | for replies | Your client token for that bridge's GrokBuild adapter. Sent only to the bridge, never in a payload |
 | `GROKBOTS_WAIT_SEC` | no | Check-in interval of one `wait_reply` / `wait: true` call (default 45, 5-600). Not a time limit |
-| `GROKBOTS_WAIT_MAX_SEC` | no | How long one `untilReply` call may keep going while the host receives progress updates (default 300, 30-3600) |
+| `GROKBOTS_WAIT_MAX_SEC` | no | How long one `untilReply` call may keep waiting, with or without progress updates (default 300, 30-3600) |
 | `GROKBOTS_READ_ONLY` | no | `1`/`true`/`yes`/`on` hides the write tools; `0`/`false`/`no`/`off`/unset = off; **any other value = on** (fails closed, one warning on stderr) |
 
 Unset variables that a host passes through literally (`${GROKBOTS_WEBHOOK_URL}`) count as unset.
@@ -143,7 +145,7 @@ Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sendin
 ## Tests
 
 ```bash
-cd mcp/grokbots && npm ci && npm test   # 44 tests; a loopback mock stands in for the routine
+cd mcp/grokbots && npm ci && npm test   # loopback mocks stand in for the routine and the bridge
 ```
 
 CI runs typecheck, build and tests on ubuntu-latest and windows-latest (Node 20).

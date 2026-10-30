@@ -47,7 +47,7 @@ const timeoutArg = {
   },
   untilReply: {
     type: "boolean",
-    description: "Keep waiting inside this one call, sending progress updates, until the reply or GROKBOTS_WAIT_MAX_SEC (default 300 s). Only when the host asked for progress (progressToken); otherwise it waits one check-in.",
+    description: "Keep waiting inside this one call until the reply (or expired / cancelled / host abort), up to GROKBOTS_WAIT_MAX_SEC (default 300 s) or timeoutSec if larger. Works with or without MCP progress; if the host sent a progressToken it also gets progress updates. On send_prompt it implies wait. Pass your own requestId on send_prompt: if the host times the call out, don't resend (that runs the bot twice); resume with wait_reply using that requestId.",
   },
 };
 
@@ -121,7 +121,12 @@ const ALL_TOOLS = [
           type: "boolean",
           description: "Ask the bridge for a one-time reply route (default true when GROKBOTS_BRIDGE_URL is set; false sends one-way).",
         },
-        wait: { type: "boolean", description: "After a confirmed send, check in once for the reply (needs the bridge; timeoutSec is the check-in interval). No reply yet = waitResult.state \"awaiting_reply\": keep calling wait_reply. Default false: use wait_reply later." },
+        requestId: {
+          type: "string",
+          description:
+            "Optional id for this send (8-64 of A-Z a-z 0-9 _ -, e.g. a UUID). Pass your own when you wait (untilReply / wait / timeoutSec): if the host times the call out, you still know it, so don't resend; resume with wait_reply using that requestId. Reusing an id this process already sent, or one the bridge still has open, is refused (nothing sent). Default: a new UUID.",
+        },
+        wait: { type: "boolean", description: "After a confirmed send, wait for the reply in this call and return it as waitResult (needs the bridge). timeoutSec is the wait; untilReply waits longer. Implied by untilReply or timeoutSec unless wait is false. No reply yet = waitResult.state \"awaiting_reply\": keep calling wait_reply. Default false: use wait_reply later." },
         ...timeoutArg,
         ...confirmArg,
       },
@@ -152,12 +157,22 @@ function timeoutOf(args: Record<string, unknown>): number {
 
 type WaitOpts = { timeoutSec: number; untilReply: boolean };
 
-/** One wait_reply call: a check-in, or (untilReply + host progress) a longer wait with progress updates. */
-async function runWait(bridge: BridgeConfig, requestId: string, o: WaitOpts, progress?: ProgressFn, signal?: AbortSignal) {
-  const keepGoing = o.untilReply && Boolean(progress);
-  const budget = keepGoing ? Math.max(o.timeoutSec, untilReplySec()) : o.timeoutSec;
+/**
+ * One wait: a check-in of timeoutSec, or with untilReply a longer blocking wait (up to
+ * GROKBOTS_WAIT_MAX_SEC). Progress is an extra: sent when the host gave a progressToken,
+ * never a condition for waiting. The host's abort signal ends it at once.
+ */
+async function runWait(bridge: BridgeConfig, requestId: string, o: WaitOpts, progress?: ProgressFn, signal?: AbortSignal, announce?: string) {
+  const budget = o.untilReply ? Math.max(o.timeoutSec, untilReplySec()) : o.timeoutSec;
+  // After a send, the first progress update names the requestId at once, so a host that times out later still has it.
+  let lastTickAt: number | undefined;
+  if (announce && progress && !signal?.aborted) {
+    await progress(0, announce);
+    lastTickAt = Date.now();
+  }
   const w = await waitReply(bridge, requestId, budget, {
     signal,
+    lastTickAt,
     onTick: progress
       ? async (t) => {
           if (signal?.aborted) return;
@@ -165,11 +180,7 @@ async function runWait(bridge: BridgeConfig, requestId: string, o: WaitOpts, pro
         }
       : undefined,
   });
-  const body = waitBody(w);
-  if (o.untilReply && !progress && body.state === "awaiting_reply") {
-    return { ...body, untilReply: "limited: the host asked for no progress updates (no progressToken), so this call waited one check-in only" };
-  }
-  return body;
+  return waitBody(w);
 }
 
 const NEXT_STEP =
@@ -181,6 +192,9 @@ const NEXT_STEP =
  * never knew (wrong id, or GROKBOTS_BRIDGE_URL pointing at the wrong path or proxy). Memory only, bounded.
  */
 const known = new Map<string, { expiresAt?: string; seen: boolean }>();
+/** requestIds this process has sent (confirmed sends), so a caller-supplied id is never sent twice. */
+const usedIds = new Set<string>();
+
 export function rememberRoute(requestId: string, info: { expiresAt?: string; seen: boolean }): void {
   const prev = known.get(requestId);
   known.delete(requestId);
@@ -192,7 +206,7 @@ function waitBody(w: WaitResult) {
   if (w.ok) rememberRoute(w.requestId, { expiresAt: w.expiresAt, seen: true });
   if (!w.ok) {
     if (w.error === "aborted") {
-      return { ok: false, done: false, requestId: w.requestId, state: "aborted", checkedForSec: w.waitedSec, note: "The host cancelled this wait. The reply route stays open; call wait_reply again to resume." };
+      return { ok: false, done: false, requestId: w.requestId, state: "aborted", checkedForSec: w.waitedSec, next: { tool: "wait_reply", arguments: { requestId: w.requestId } }, note: "The host cancelled this wait. The reply route stays open; call wait_reply again to resume." };
     }
     if (w.error === "bridge_http_404") {
       const k = known.get(w.requestId);
@@ -319,6 +333,20 @@ async function deliver(
   let replyInfo: Record<string, unknown> | undefined;
   if (wantReply) {
     const ex = await expectReply(bridge, String(payload.requestId), bot.name);
+    if (!ex.ok && ex.status === 409) {
+      return jsonResult(
+        {
+          ok: false,
+          sent: false,
+          ...preview,
+          errorCode: "request_id_in_use",
+          httpStatus: 409,
+          next: { tool: "wait_reply", arguments: { requestId: payload.requestId } },
+          error: "The bridge already has an open reply route for this requestId, so it was sent before. Nothing sent: don't resend, call wait_reply with this requestId (or use a new id for a new prompt).",
+        },
+        true,
+      );
+    }
     if (!ex.ok) {
       return jsonResult(
         {
@@ -337,6 +365,9 @@ async function deliver(
     replyInfo = { expected: true, requestId: payload.requestId, expiresAt: ex.route.expiresAt };
     rememberRoute(String(payload.requestId), { expiresAt: ex.route.expiresAt, seen: true });
   }
+  usedIds.add(String(payload.requestId));
+  // stderr only (stdout is the MCP stream): the id survives a host timeout in the host's server log. No keys or tokens.
+  console.error(`grokbots: send_prompt to ${bot.name}, requestId ${String(payload.requestId)}${replyInfo ? " (reply route open)" : ""}`);
   const res = await postWebhook(bot.url as string, key, body);
   const accepted = res.ok && (res.body as { success?: unknown })?.success !== false;
   // The routine surely did not take it (refused before sending, non-2xx, or success:false): free the
@@ -345,7 +376,21 @@ async function deliver(
     replyInfo = { ...replyInfo, expected: false, cancelled: await cancelReply(bridge, String(payload.requestId)) };
   }
   let waited: Record<string, unknown> | undefined;
-  if (accepted && replyInfo && replyOpts?.wait) waited = await runWait(bridge, String(payload.requestId), replyOpts, progress, signal);
+  if (replyInfo && replyOpts?.wait) {
+    const requestId = String(payload.requestId);
+    if (accepted) waited = await runWait(bridge, requestId, replyOpts, progress, signal, `sent to ${bot.name}, requestId ${requestId}: waiting for the reply`);
+    else if (res.sent === "unknown" || res.error === "webhook_response_read_failed") {
+      // The routine may have it: no wait here, but the route is kept for a later wait_reply.
+      waited = {
+        ok: false,
+        done: false,
+        requestId,
+        state: "send_unconfirmed",
+        next: { tool: "wait_reply", arguments: { requestId } },
+        note: "The webhook send was not confirmed, so this call did not wait. The reply route is kept: call wait_reply with this requestId to see if the bot answers.",
+      };
+    } else waited = { ok: false, done: true, requestId, state: "not_sent", note: "The routine did not take the prompt, so there is nothing to wait for. reply.cancelled says whether the bridge route was freed (best effort)." };
+  }
   return jsonResult(
     {
       ok: accepted,
@@ -438,17 +483,37 @@ export async function handleTool(
         sentAt: new Date().toISOString(),
         requestId: crypto.randomUUID(),
       };
+      if (args.requestId !== undefined) {
+        const id = typeof args.requestId === "string" ? args.requestId.trim() : "";
+        if (!REQUEST_ID_RE.test(id)) return jsonResult({ ok: false, sent: false, error: "requestId must be 8-64 of A-Z a-z 0-9 _ - (e.g. a UUID). Nothing sent." }, true);
+        if (args.confirm === true && usedIds.has(id)) {
+          return jsonResult(
+            {
+              ok: false,
+              sent: false,
+              errorCode: "request_id_in_use",
+              requestId: id,
+              next: { tool: "wait_reply", arguments: { requestId: id } },
+              error: "This requestId was already sent from here. Nothing sent: don't resend (that runs the bot twice); call wait_reply with it, or use a new id for a new prompt.",
+            },
+            true,
+          );
+        }
+        payload.requestId = id;
+      }
       if (replyHint) payload.replyHint = replyHint;
       const bridge = loadBridge();
       const expect = typeof args.expectReply === "boolean" ? args.expectReply : bridge.configured;
-      if (args.wait === true && !expect) {
-        return jsonResult({ ok: false, sent: false, error: "wait=true needs a reply route: set GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY and leave expectReply on. Nothing sent." }, true);
+      // untilReply or timeoutSec ask for a wait too (unless wait is explicitly false).
+      const wantWait = args.wait === true || (args.wait !== false && (args.untilReply === true || typeof args.timeoutSec === "number"));
+      if (wantWait && !expect) {
+        return jsonResult({ ok: false, sent: false, error: "Waiting (wait, untilReply or timeoutSec) needs a reply route: set GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY and leave expectReply on. Nothing sent." }, true);
       }
       return deliver(
         p.bot,
         payload,
         args.confirm === true,
-        { expectReply: expect, wait: args.wait === true, timeoutSec: timeoutOf(args), untilReply: args.untilReply === true },
+        { expectReply: expect, wait: wantWait, timeoutSec: timeoutOf(args), untilReply: args.untilReply === true },
         ctx.progress,
         ctx.signal,
       );
