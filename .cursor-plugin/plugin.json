@@ -83,7 +83,7 @@
       "GROKBOTS_WAIT_MAX_SEC": {
         "type": "string",
         "title": "untilReply budget (seconds)",
-        "description": "Optional. How long one untilReply call may keep waiting while the host receives progress notifications (default 300, 30-3600)."
+        "description": "Optional. How long one untilReply call may keep waiting, with or without progress notifications (default 300, 30-3600)."
       }
     },
     "required": []

@@ -45,7 +45,7 @@ async function relayBridge(opts: { bots?: string[]; answer?: string; delayMs?: n
       return send(200, { ok: true, client: "example-client", readOnly: Boolean(opts.readOnly), replyChannel: "ready", directReplies: "ready", bots });
     }
     if (url.pathname === "/grokbuild/prompt") {
-      if (opts.promptStatus) return res.writeHead(opts.promptStatus, { "content-type": "text/html" }).end(opts.promptRaw ?? "<html>Bad gateway</html>");
+      if (opts.promptStatus) return res.writeHead(opts.promptStatus, { "content-type": opts.promptRaw?.startsWith("{") ? "application/json" : "text/html" }).end(opts.promptRaw ?? "<html>Bad gateway</html>");
       if (opts.readOnly) return send(403, { ok: false, error: "read_only" });
       if (!bots.includes(body.bot)) return send(403, { ok: false, error: "no_route" });
       if (recs.has(body.requestId)) return send(409, { ok: false, error: "duplicate requestId" });
@@ -222,6 +222,32 @@ test("relay gateway 502 on /grokbuild/prompt: send_unconfirmed, id kept, no wait
   }
 });
 
+test("relay 503: only the bridge's own reasons are not_sent; a proxy 503 with JSON is send_unconfirmed (id kept)", async () => {
+  // a proxy in front of the bridge answering JSON that is not a bridge reason
+  const proxy = await relayBridge({ promptStatus: 503, promptRaw: JSON.stringify({ error: "Service Unavailable" }) });
+  try {
+    relayEnv(proxy.url);
+    const id = "relay-proxy503-01";
+    const r = out(await handleTool("send_prompt", { bot: "example-agent", prompt: "x", requestId: id, confirm: true, untilReply: true }, ro));
+    assert.deepEqual([r.ok, r.sent, r.httpStatus, r.waitResult.state, r.waitResult.done], [false, "unknown", 503, "send_unconfirmed", false]);
+    assert.equal(isRequestIdUsed(id), true, "id kept");
+    assert.equal(deletes(proxy).length, 0);
+  } finally {
+    await proxy.close();
+  }
+  // the bridge's own 503 reason: a definite refusal, the id is freed
+  const own = await relayBridge({ promptStatus: 503, promptRaw: JSON.stringify({ ok: false, error: "agent_not_ready" }) });
+  try {
+    relayEnv(own.url);
+    const id = "relay-own503-0001";
+    const r = out(await handleTool("send_prompt", { bot: "example-agent", prompt: "x", requestId: id, confirm: true, wait: true, timeoutSec: 2 }, ro));
+    assert.deepEqual([r.ok, r.sent, r.bridgeError, r.waitResult.state], [false, false, "agent_not_ready", "not_sent"]);
+    assert.equal(isRequestIdUsed(id), false, "id freed");
+  } finally {
+    await own.close();
+  }
+});
+
 test("mixed: a roster bot stays direct, another name relays; wake_bot refuses a relay bot; expectReply:false refused in relay", async () => {
   const bridge = await relayBridge({ answer: "from relay" });
   const hits: any[] = [];
@@ -244,6 +270,10 @@ test("mixed: a roster bot stays direct, another name relays; wake_bot refuses a 
     assert.match(wake.error, /direct webhook/);
     const er = out(await handleTool("send_prompt", { bot: "example_relay_bot", prompt: "y", confirm: true, expectReply: false }, ro));
     assert.deepEqual([er.ok, er.sent], [false, false]);
+    // a name in neither list: bot_not_routed names the routed bots and the roster's direct bots
+    const nr = out(await handleTool("send_prompt", { bot: "example-nowhere", prompt: "y", confirm: true }, ro));
+    assert.deepEqual([nr.ok, nr.sent, nr.errorCode, nr.rosterBots], [false, false, "bot_not_routed", ["example-direct"]]);
+    assert.match(nr.error, /Direct \(webhook\) bots here: example-direct/);
     const bad = out(await handleTool("send_prompt", { bot: "Example Bot", prompt: "y", confirm: true }, ro));
     assert.deepEqual([bad.ok, bad.sent], [false, false]);
   } finally {

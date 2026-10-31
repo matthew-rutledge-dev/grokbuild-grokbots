@@ -478,13 +478,16 @@ async function deliver(
   );
 }
 
+/** The GrokBuild adapter's own 503 reasons on POST /grokbuild/prompt (bridge 0.2.5): a definite refusal. */
+export const BRIDGE_503_REASONS: ReadonlySet<string> = new Set(["reply_channel_unset", "agent_not_ready", "client_auth_unset", "client_token_shared"]);
+
 /**
  * Relay mode send: one POST <bridge>/grokbuild/prompt with the client key. The bridge delivers
  * to the bot's routine (it holds the routine key) and the bot answers through the bridge's
  * callback, so the wait is the same long-poll as direct mode. Never DELETEs: the bridge
  * refuses to cancel a relayed request (409), and an abort keeps it for a later wait_reply.
  *   accepted (202, state delivered | held)       -> sent: true, id kept, wait if asked
- *   refused (4xx, or a 503 with a bridge error)  -> not_sent, id released (the bridge kept nothing)
+ *   refused (4xx, or a 503 with a bridge reason) -> not_sent, id released (the bridge kept nothing)
  *   409                                          -> request_id_in_use, nothing sent
  *   no answer / gateway 5xx / unreadable answer  -> send_unconfirmed, id kept, no wait
  */
@@ -522,6 +525,8 @@ async function relayDeliver(
     );
   }
   if (!st.bots.includes(botName)) {
+    const rosterNames = loadRoster().bots.map((b) => b.name);
+    const direct = rosterNames.length ? ` Direct (webhook) bots here: ${rosterNames.join(", ")}.` : "";
     return jsonResult(
       {
         ok: false,
@@ -530,7 +535,8 @@ async function relayDeliver(
         requestId,
         errorCode: "bot_not_routed",
         routedBots: st.bots,
-        error: `The bridge does not route bot ${JSON.stringify(botName)} for this client, so nothing was sent. Routed bots: ${st.bots.length ? st.bots.join(", ") : "(none)"}. Pass one of them as bot, or set ${BRIDGE_DEFAULT_BOT_ENV} to one.`,
+        ...(rosterNames.length ? { rosterBots: rosterNames } : {}),
+        error: `The bridge does not route bot ${JSON.stringify(botName)} for this client, so nothing was sent. Routed bots: ${st.bots.length ? st.bots.join(", ") : "(none)"}.${direct} Pass one of them as bot, or set ${BRIDGE_DEFAULT_BOT_ENV} to a routed one.`,
       },
       true,
     );
@@ -554,10 +560,14 @@ async function relayDeliver(
       true,
     );
   }
-  // The bridge itself refused (its own JSON error): nothing was recorded or delivered.
+  // The bridge itself refused: nothing was recorded or delivered. A 503 counts only with one of the
+  // bridge's own reasons; any other 503 (e.g. a proxy's "Service Unavailable") is unconfirmed.
   const refused =
     !r.ok &&
-    (r.error === "bridge_not_configured" || r.error === "bridge_key_invalid" || (r.status >= 400 && r.status < 500) || (r.status === 503 && typeof r.detail === "string"));
+    (r.error === "bridge_not_configured" ||
+      r.error === "bridge_key_invalid" ||
+      (r.status >= 400 && r.status < 500) ||
+      (r.status === 503 && typeof r.detail === "string" && BRIDGE_503_REASONS.has(r.detail)));
   const unconfirmed = !r.ok && !refused;
   if (refused) releaseRequestId(requestId);
   if (r.ok) rememberRoute(requestId, { seen: true, relay: true });
@@ -592,7 +602,7 @@ async function relayDeliver(
           : "The bridge delivered the prompt to the bot's routine. Read the reply with wait_reply (same requestId)."
         : unconfirmed
           ? "Not confirmed: bridge_timeout / bridge_network_error / a gateway 5xx / bridge_bad_response. The bridge may have taken it: don't resend; call wait_reply with this requestId."
-          : "Refused by the bridge, nothing delivered: 401 wrong GROKBOTS_BRIDGE_KEY, 403 read_only / no_route (bot not routed for this client), 400/413 bad input, 429 rate or open-request limit, 503 reply_channel_unset / agent_not_ready / client_auth_unset.",
+          : "Refused by the bridge, nothing delivered: 401 wrong GROKBOTS_BRIDGE_KEY, 403 read_only / no_route (bot not routed for this client), 400/413 bad input, 429 rate or open-request limit, 503 reply_channel_unset / agent_not_ready / client_auth_unset / client_token_shared.",
     },
     !r.ok,
   );
