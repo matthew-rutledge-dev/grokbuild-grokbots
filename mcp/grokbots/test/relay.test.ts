@@ -75,7 +75,7 @@ async function relayBridge(opts: { bots?: string[]; answer?: string; delayMs?: n
   return { url, seen, recs, close: () => new Promise<void>((r) => (srv.closeAllConnections(), srv.close(() => r()))) };
 }
 
-const KEYS = ["GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_BRIDGE_URL", "GROKBOTS_BRIDGE_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_DEFAULT_BOT", "GROKBOTS_WAIT_SEC", "GROKBOTS_WAIT_MAX_SEC"];
+const KEYS = ["GROKBOTS_BRIDGE_DEFAULT_BOT", "GROKBOTS_WEBHOOK_URL", "GROKBOTS_WEBHOOK_KEY", "GROKBOTS_BRIDGE_URL", "GROKBOTS_BRIDGE_KEY", "GROKBOTS_ROSTER_FILE", "GROKBOTS_DEFAULT_BOT", "GROKBOTS_WAIT_SEC", "GROKBOTS_WAIT_MAX_SEC"];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 afterEach(() => {
   for (const k of KEYS) {
@@ -135,9 +135,10 @@ test("relay success: list_bots/check_bot read /grokbuild/status; send_prompt unt
 test("relay timeout: no reply in the check-in -> awaiting_reply with the bridge state; abort keeps the request (no DELETE)", async () => {
   const bridge = await relayBridge();
   try {
-    relayEnv(bridge.url, { GROKBOTS_DEFAULT_BOT: "example-agent" });
+    // the relay default may differ from the direct default: GROKBOTS_BRIDGE_DEFAULT_BOT wins in relay mode
+    relayEnv(bridge.url, { GROKBOTS_DEFAULT_BOT: "example-direct-name", GROKBOTS_BRIDGE_DEFAULT_BOT: "example-agent" });
     const r = out(await handleTool("send_prompt", { prompt: "x", confirm: true, timeoutSec: 2 }, ro));
-    assert.deepEqual([r.ok, r.sent, r.bot], [true, true, "example-agent"], "GROKBOTS_DEFAULT_BOT names the relay bot");
+    assert.deepEqual([r.ok, r.sent, r.bot], [true, true, "example-agent"], "GROKBOTS_BRIDGE_DEFAULT_BOT names the relay bot");
     assert.deepEqual([r.waitResult.ok, r.waitResult.done, r.waitResult.state, r.waitResult.bridgeState, r.waitResult.next?.tool], [true, false, "awaiting_reply", "delivered", "wait_reply"]);
     const ctrl = new AbortController();
     setTimeout(() => ctrl.abort(), 300);
@@ -167,12 +168,40 @@ test("relay requestId reuse: refused locally after a send, refused on the bridge
     bridge.recs.set("relay-other-0001", { replies: [], waiters: [], created: Date.now() });
     const other = out(await handleTool("send_prompt", { bot: "example-agent", prompt: "x", requestId: "relay-other-0001", confirm: true }, ro));
     assert.deepEqual([other.ok, other.sent, other.errorCode, other.httpStatus], [false, false, "request_id_in_use", 409]);
-    // refused (bot not routed): not_sent, the id is free again, no DELETE
-    const nr = out(await handleTool("send_prompt", { bot: "example-unrouted", prompt: "x", requestId: "relay-refused-0001", confirm: true, wait: true, timeoutSec: 2 }, ro));
-    assert.deepEqual([nr.ok, nr.sent, nr.errorCode, nr.bridgeError, nr.waitResult.state], [false, false, "bridge_http_403", "no_route", "not_sent"]);
-    assert.equal(isRequestIdUsed("relay-refused-0001"), false);
-    assert.equal(prompts(bridge).length, 3, "the local refusal made no call");
+    assert.equal(prompts(bridge).length, 2, "the local refusal made no call");
     assert.equal(deletes(bridge).length, 0);
+  } finally {
+    await bridge.close();
+  }
+  // refused by the bridge (read-only): not_sent, the id is free again, no DELETE
+  const roBridge = await relayBridge({ readOnly: true });
+  try {
+    relayEnv(roBridge.url);
+    const nr = out(await handleTool("send_prompt", { bot: "example-agent", prompt: "x", requestId: "relay-refused-0001", confirm: true, wait: true, timeoutSec: 2 }, ro));
+    assert.deepEqual([nr.ok, nr.sent, nr.errorCode, nr.bridgeError, nr.waitResult.state], [false, false, "bridge_http_403", "read_only", "not_sent"]);
+    assert.equal(isRequestIdUsed("relay-refused-0001"), false);
+    assert.equal(deletes(roBridge).length, 0);
+  } finally {
+    await roBridge.close();
+  }
+});
+
+test("relay fail-fast: a bot the bridge doesn't route (or a default that isn't routed) is refused with the routed list, nothing sent", async () => {
+  const bridge = await relayBridge();
+  try {
+    relayEnv(bridge.url, { GROKBOTS_BRIDGE_DEFAULT_BOT: "example-not-routed" });
+    const r = out(await handleTool("send_prompt", { bot: "example-unrouted", prompt: "x", requestId: "relay-unrouted-01", confirm: true, untilReply: true }, ro));
+    assert.deepEqual([r.ok, r.sent, r.errorCode], [false, false, "bot_not_routed"]);
+    assert.deepEqual(r.routedBots, ["example-agent", "example_relay_bot"]);
+    assert.match(r.error, /example-agent, example_relay_bot/);
+    assert.equal(isRequestIdUsed("relay-unrouted-01"), false);
+    const d = out(await handleTool("send_prompt", { prompt: "x", confirm: true }, ro));
+    assert.deepEqual([d.ok, d.sent, d.bot, d.errorCode], [false, false, "example-not-routed", "bot_not_routed"]);
+    assert.equal(prompts(bridge).length, 0, "nothing sent");
+    // no bot, no relay default: a clear error naming the variable
+    relayEnv(bridge.url);
+    const none = out(await handleTool("send_prompt", { prompt: "x", confirm: true }, ro));
+    assert.match(none.error, /GROKBOTS_BRIDGE_DEFAULT_BOT/);
   } finally {
     await bridge.close();
   }

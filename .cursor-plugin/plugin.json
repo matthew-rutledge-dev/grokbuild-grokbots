@@ -70,6 +70,11 @@
         "title": "Reply bridge client key",
         "description": "Optional. Your client token for that bridge's GrokBuild adapter, sent only as Authorization: Bearer to the bridge. Never put in a prompt or payload; never commit or paste it in chat."
       },
+      "GROKBOTS_BRIDGE_DEFAULT_BOT": {
+        "type": "string",
+        "title": "Relay default bot",
+        "description": "Optional. Relay mode only: the bridge bot name used when send_prompt gets no bot and no webhook bot applies (lowercase, as list_bots shows it, e.g. example-agent). Falls back to GROKBOTS_DEFAULT_BOT."
+      },
       "GROKBOTS_WAIT_SEC": {
         "type": "string",
         "title": "Reply check-in interval (seconds)",

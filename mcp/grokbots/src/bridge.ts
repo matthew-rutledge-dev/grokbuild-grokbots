@@ -20,6 +20,8 @@ import { KEY_RE, webhookErrorCode } from "./webhook.js";
 
 export const BRIDGE_URL_ENV = "GROKBOTS_BRIDGE_URL";
 export const BRIDGE_KEY_ENV = "GROKBOTS_BRIDGE_KEY";
+/** Relay mode: bot used when send_prompt gets no bot (falls back to GROKBOTS_DEFAULT_BOT). */
+export const BRIDGE_DEFAULT_BOT_ENV = "GROKBOTS_BRIDGE_DEFAULT_BOT";
 /** Longest single long-poll asked of the bridge (its maxWaitSec default is 25). */
 export const POLL_SEC = 25;
 export const WAIT_SEC_ENV = "GROKBOTS_WAIT_SEC";

@@ -16,6 +16,7 @@ import { loadRoster, publicBot, redactUrl, type BotEntry } from "./roster.js";
 import { SERVER_NAME, VERSION } from "./version.js";
 import {
   BRIDGE_BOT_RE,
+  BRIDGE_DEFAULT_BOT_ENV,
   DEFAULT_WAIT_SEC,
   MAX_WAIT_SEC,
   bridgeStatus,
@@ -323,9 +324,9 @@ function pickTarget(args: Record<string, unknown>, allowRelay: boolean): Target 
   if (!want) {
     if (roster.bots.length === 1) return { bot: roster.bots[0], errors: roster.errors };
     if (roster.bots.length === 0 && relayOn) {
-      const def = readEnv("GROKBOTS_DEFAULT_BOT");
+      const def = readEnv(BRIDGE_DEFAULT_BOT_ENV) ?? readEnv("GROKBOTS_DEFAULT_BOT");
       if (def) return relay(def);
-      return { error: "Relay mode: pass bot (call list_bots for the bots the bridge routes for you), or set GROKBOTS_DEFAULT_BOT.", errors: roster.errors };
+      return { error: `Relay mode: pass bot (call list_bots for the bots the bridge routes for you), or set ${BRIDGE_DEFAULT_BOT_ENV}.`, errors: roster.errors };
     }
     return {
       error:
@@ -511,6 +512,28 @@ async function relayDeliver(
       ...preview,
       note: "Dry-run preview only. Re-call with confirm=true to send once through the bridge; the bridge delivers it to this bot's routine and the bot answers through the bridge.",
     });
+  }
+  // Fail fast: only send to a bot the bridge routes for this client (one read, writes nothing).
+  const st = await bridgeStatus(bridge);
+  if (!st.ok) {
+    return jsonResult(
+      { ok: false, sent: false, ...preview, requestId, errorCode: st.error, httpStatus: st.status, bridgeError: st.detail, error: "Could not read the bridge's routed bots (GET /grokbuild/status), so nothing was sent. 401 = wrong GROKBOTS_BRIDGE_KEY; bridge_timeout / bridge_network_error = bridge unreachable." },
+      true,
+    );
+  }
+  if (!st.bots.includes(botName)) {
+    return jsonResult(
+      {
+        ok: false,
+        sent: false,
+        ...preview,
+        requestId,
+        errorCode: "bot_not_routed",
+        routedBots: st.bots,
+        error: `The bridge does not route bot ${JSON.stringify(botName)} for this client, so nothing was sent. Routed bots: ${st.bots.length ? st.bots.join(", ") : "(none)"}. Pass one of them as bot, or set ${BRIDGE_DEFAULT_BOT_ENV} to one.`,
+      },
+      true,
+    );
   }
   markRequestIdUsed(requestId);
   console.error(`grokbots: send_prompt to ${botName} (relay), requestId ${requestId}`);

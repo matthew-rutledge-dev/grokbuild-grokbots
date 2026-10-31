@@ -42,7 +42,7 @@ Point `GROKBOTS_ROSTER_FILE` at a JSON file outside any repo. An absolute path o
 
 ## No webhook here: relay mode (0.1.11+)
 
-With `GROKBOTS_BRIDGE_URL` + `GROKBOTS_BRIDGE_KEY` set (your bridge's base URL and your client token for its GrokBuild adapter), a bot needs no webhook on this computer: `send_prompt` to a name that isn't in the env bot or roster goes through the bridge, which holds the routine key. With no env bot and no roster, `list_bots` shows the bots the bridge routes for your client. `GROKBOTS_DEFAULT_BOT` then names the bot used when `bot` is omitted. A name that is in the roster always goes direct. See the README section "Relay mode".
+With `GROKBOTS_BRIDGE_URL` + `GROKBOTS_BRIDGE_KEY` set (your bridge's base URL and your client token for its GrokBuild adapter), a bot needs no webhook on this computer: `send_prompt` to a name that isn't in the env bot or roster goes through the bridge, which holds the routine key. With no env bot and no roster, `list_bots` shows the bots the bridge routes for your client. `GROKBOTS_BRIDGE_DEFAULT_BOT` names the relay bot used when `bot` is omitted (falls back to `GROKBOTS_DEFAULT_BOT`); it must be a bot the bridge routes for you, or sends fail fast with `bot_not_routed` and the routed list. A name that is in the roster always goes direct. See the README section "Relay mode".
 
 ## Lookup order
 
