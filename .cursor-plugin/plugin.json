@@ -1,7 +1,7 @@
 {
   "name": "grokbuild-grokbots",
   "displayName": "GrokBuild to Grok Bots",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Let Grok Build (or Cursor) wake a Grok Bot or send it a prompt through the bot's own webhook-triggered routine. One grokbots MCP server with a roster, confirm-gated sends and an optional read-only mode, plus setup skills. Each installer uses their own routine URL and key.",
   "author": {
     "name": "Matthew Rutledge"
@@ -63,7 +63,7 @@
       "GROKBOTS_BRIDGE_URL": {
         "type": "string",
         "title": "Reply bridge URL",
-        "description": "Optional. Base URL of YOUR grok-bot-universal-bridge with the GrokBuild adapter (placeholder example https://bridge.example.com). When set with GROKBOTS_BRIDGE_KEY, send_prompt asks it for a one-time reply route and wait_reply reads the bot's reply; a bot with no webhook here is sent through the bridge instead (relay mode, 0.1.11+). https only (plain http only to loopback)."
+        "description": "Optional. Base URL of YOUR grok-bot-universal-bridge with the GrokBuild adapter (placeholder example https://bridge.example.com). When set with GROKBOTS_BRIDGE_KEY, send_prompt asks it for a one-time reply route and wait_reply reads the bot's reply; a bot with no webhook here is sent through the bridge instead (relay mode, 0.1.12+). https only (plain http only to loopback)."
       },
       "GROKBOTS_BRIDGE_KEY": {
         "type": "string",

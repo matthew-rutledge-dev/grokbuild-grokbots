@@ -1,6 +1,6 @@
 {
   "name": "grokbots-mcp",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "type": "module",
   "description": "MCP server: wake a Grok Bot or send it a prompt through its webhook-triggered routine (confirm-gated; GROKBOTS_READ_ONLY on hides writes)",

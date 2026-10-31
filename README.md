@@ -104,7 +104,7 @@ Two ways to reach a bot, chosen per bot:
 | Mode | When | Variables on this computer | Who holds the routine key |
 |---|---|---|---|
 | **Direct** | The bot has a webhook here: the env bot (`GROKBOTS_WEBHOOK_URL` + `GROKBOTS_WEBHOOK_KEY`) or a roster entry | Webhook URL + key; add `GROKBOTS_BRIDGE_URL` + `GROKBOTS_BRIDGE_KEY` for replies | This computer |
-| **Relay** (0.1.11+) | No webhook here for that bot name, and `GROKBOTS_BRIDGE_URL` + `GROKBOTS_BRIDGE_KEY` are set | Only the bridge URL and your client token | The bridge host (its private registry) |
+| **Relay** (0.1.12+) | No webhook here for that bot name, and `GROKBOTS_BRIDGE_URL` + `GROKBOTS_BRIDGE_KEY` are set | Only the bridge URL and your client token | The bridge host (its private registry) |
 
 A bot with a webhook here always goes direct, unchanged. Any other name goes to the bridge when it is set. With no webhook and no roster at all, everything is relay.
 
@@ -160,7 +160,7 @@ Errors come back as fixed codes, never raw network error text. A key that is not
 |---|---|---|
 | `webhook_key_invalid` | `false` | Key refused before the request; nothing went out |
 | `webhook_http_<status>` | `true` | The routine answered with a non-2xx status (401/403 wrong key or header, 404 wrong URL or deleted routine) |
-| `webhook_http_502` / `503` / `504` / `524` | `"unknown"` | A gateway in front of the routine answered, not the routine (since 0.1.11). It may have started the routine before timing out: `send_unconfirmed`, the `requestId` stays used and the reply route is kept; don't resend, use `wait_reply` |
+| `webhook_http_502` / `503` / `504` / `524` | `"unknown"` | A gateway in front of the routine answered, not the routine (since 0.1.12). It may have started the routine before timing out: `send_unconfirmed`, the `requestId` stays used and the reply route is kept; don't resend, use `wait_reply` |
 | `webhook_timeout` | `"unknown"` | No response within 8 s. The request may already have reached the routine |
 | `webhook_network_error` | `"unknown"` | Connection, TLS or refused-redirect failure. The request may or may not have reached the routine |
 | `webhook_response_read_failed` | `true` | The routine answered (`httpStatus` is set), then the connection failed while reading its reply body. The request arrived; don't resend it |
