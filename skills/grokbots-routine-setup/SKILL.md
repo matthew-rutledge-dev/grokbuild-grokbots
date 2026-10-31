@@ -60,8 +60,8 @@ From Grok Build or Cursor: `list_bots`, then `check_bot`, then `wake_bot` with `
 Recreating the bot or rotating the routine's key changes its URL, key or both. Every caller then gets 401/404 until it's updated.
 
 1. Read the new URL and key only from the routine's sidebar fields (step **c**). Never paste them into chat.
-2. Update wherever your secrets store holds them, then every caller that reads them: the reply bridge's wake settings (re-render its env and recreate the container), and any direct caller's `GROKBOTS_WEBHOOK_URL` / `GROKBOTS_WEBHOOK_KEY` or roster key file.
-3. Verify with a `send_prompt` + `wait_reply` pong (step **e**) and, if the bridge also wakes the bot, one bridge wake.
+2. Update wherever your secrets store holds them, then every caller that reads them: the reply bridge's wake settings (re-render its env and recreate the container), and any direct caller's `GROKBOTS_WEBHOOK_URL` / `GROKBOTS_WEBHOOK_KEY` or roster entry. A recreated bot has a new URL too, so update the roster entry's `url` / `urlEnv` as well as its key file.
+3. Verify with a `send_prompt` + `wait_reply` pong (step **e**) and, if the bridge also wakes the bot, one bridge wake. Pass your own `requestId` on the pong so that if the host times out you can resume with `wait_reply`.
 
 If every caller goes through one bridge, only the bridge needs the new values.
 
