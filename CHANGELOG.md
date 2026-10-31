@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11
+
+- Docs: `grokbots-routine-setup` gains a "Rotate the routine" section for a recreated bot or a rotated key: take the new URL and key only from the routine's sidebar fields, update the secrets store and every caller (bridge wake settings, direct `GROKBOTS_WEBHOOK_URL` / `GROKBOTS_WEBHOOK_KEY`, roster `url` / `urlEnv` and key file), then verify with a pong (with your own `requestId`) and one bridge wake.
+- Bump manifests, MCP package and `VERSION` to `0.1.11`.
+
 ## 0.1.10
 
 - **Fix: a `not_sent` result no longer burns a caller-supplied `requestId`.** The id was marked used before the webhook POST, so when the routine refused the prompt (non-2xx or `success: false`) a resend with the same id was refused as `request_id_in_use` although nothing was delivered. The id is now released on `not_sent`; it stays used on success and on `send_unconfirmed` (the bot may have it).
