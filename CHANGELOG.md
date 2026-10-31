@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.10
+
+- **Fix: a `not_sent` result no longer burns a caller-supplied `requestId`.** The id was marked used before the webhook POST, so when the routine refused the prompt (non-2xx or `success: false`) a resend with the same id was refused as `request_id_in_use` although nothing was delivered. The id is now released on `not_sent`; it stays used on success and on `send_unconfirmed` (the bot may have it).
+- The set of used `requestId`s is bounded at 1000 entries, oldest dropped first, like the known-routes map (the bridge's 409 still guards an id whose route is open).
+- README: use the latest grok-bot-universal-bridge release; `untilReply` blocking, a caller-supplied `requestId` and `request_id_in_use` need 0.2.5 or later.
+- Tests: `not_sent` frees the id and a resend goes through (404 and `success: false`); `send_unconfirmed` keeps it and a resend is refused; the used-id cap evicts oldest first and a re-mark refreshes (51 tests).
+- Bump manifests, MCP package and `VERSION` to `0.1.10`.
+
 ## 0.1.9
 
 - **Fix: `untilReply` blocks without a `progressToken`.** Headless hosts send no progress token, and `send_prompt(confirm: true, untilReply: true)` returned at once with no `waitResult`: the send only waited with `wait: true`, and the wait loop ran past one check-in only when the host asked for progress. Now `untilReply` or `timeoutSec` on `send_prompt` asks for a wait (unless `wait: false`), and `untilReply` polls in check-ins until `replied` / `expired` / `cancelled` / host abort or `GROKBOTS_WAIT_MAX_SEC` (or `timeoutSec` if larger), with or without a token. Progress notifications are still sent when a token is present. The `untilReply: "limited: …"` note is gone.

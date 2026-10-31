@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, test } from "node:test";
-import { REPLY_HOW, handleTool } from "../src/tools.js";
+import { MAX_USED_IDS, REPLY_HOW, handleTool, isRequestIdUsed, markRequestIdUsed } from "../src/tools.js";
 import { DEFAULT_WAIT_SEC, bridgeUrl, checkInSec, loadBridge, progressTiming, replyUrlPreview, untilReplySec, waitReply, waitingFor } from "../src/bridge.js";
 
 const ROUTINE_KEY = "placeholder-key-11111111";
@@ -543,6 +543,59 @@ test("send_prompt requestId: caller-supplied id is used, validated, and never se
     await routine.close();
     await bridge.close();
   }
+});
+
+test("send_prompt requestId: not_sent frees the caller's id for a resend; send_unconfirmed keeps it", async () => {
+  // not_sent (routine refused: non-2xx or success:false): the id is released, a resend goes through
+  for (const [status, success, n] of [[404, true, 1], [200, false, 2]] as const) {
+    const bridge = await fakeBridge({ maxWait: 1 });
+    const refused = await fakeRoutine(undefined, 0, status, success);
+    const ok = await fakeRoutine(undefined);
+    const id = `not-sent-id-000${n}`;
+    try {
+      env(refused.url, bridge.url);
+      const first = out(await handleTool("send_prompt", { prompt: "x", confirm: true, wait: true, timeoutSec: 5, requestId: id }, ro));
+      assert.deepEqual([first.ok, first.waitResult.state, first.reply.cancelled], [false, "not_sent", true]);
+      assert.equal(isRequestIdUsed(id), false, "not_sent releases the id");
+      env(ok.url, bridge.url);
+      const again = out(await handleTool("send_prompt", { prompt: "x", confirm: true, requestId: id }, ro));
+      assert.deepEqual([again.ok, again.requestId, again.errorCode], [true, id, undefined]);
+      assert.equal(ok.hits.length, 1);
+      assert.equal(isRequestIdUsed(id), true, "a confirmed send marks it");
+    } finally {
+      await refused.close();
+      await ok.close();
+      await bridge.close();
+    }
+  }
+  // send_unconfirmed (connection died after the POST): the id stays used, a resend is refused locally
+  const dropped = await fakeRoutine(undefined, 0, 200, true, true);
+  try {
+    env(dropped.url);
+    const id = "unconfirmed-id-0001";
+    const first = out(await handleTool("send_prompt", { prompt: "x", confirm: true, requestId: id }, ro));
+    assert.equal(first.sent, "unknown");
+    assert.equal(isRequestIdUsed(id), true);
+    const again = out(await handleTool("send_prompt", { prompt: "x", confirm: true, requestId: id }, ro));
+    assert.deepEqual([again.ok, again.sent, again.errorCode], [false, false, "request_id_in_use"]);
+    assert.equal(dropped.hits.length, 1, "the bot is not run twice");
+  } finally {
+    await dropped.close();
+  }
+});
+
+test("used requestIds are capped: oldest dropped first, a re-mark refreshes", () => {
+  const ids = Array.from({ length: MAX_USED_IDS }, (_, i) => `cap-test-${String(i).padStart(5, "0")}`);
+  for (const id of ids) markRequestIdUsed(id);
+  markRequestIdUsed(ids[0]); // refresh: now the newest
+  markRequestIdUsed("cap-test-extra-0001");
+  assert.equal(isRequestIdUsed(ids[0]), true, "refreshed id kept");
+  assert.equal(isRequestIdUsed(ids[1]), false, "oldest evicted");
+  assert.equal(isRequestIdUsed(ids[2]), true);
+  assert.equal(isRequestIdUsed("cap-test-extra-0001"), true);
+  for (let i = 0; i < MAX_USED_IDS; i++) markRequestIdUsed(`cap-test-more-${i}`);
+  assert.equal(isRequestIdUsed(ids[0]), false, "never more than MAX_USED_IDS");
+  assert.equal(isRequestIdUsed(`cap-test-more-${MAX_USED_IDS - 1}`), true);
 });
 
 test("send_unconfirmed: webhook connection dies after the POST -> waitResult done:false, next wait_reply; no read, no cancel", async () => {

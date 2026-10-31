@@ -192,8 +192,27 @@ const NEXT_STEP =
  * never knew (wrong id, or GROKBOTS_BRIDGE_URL pointing at the wrong path or proxy). Memory only, bounded.
  */
 const known = new Map<string, { expiresAt?: string; seen: boolean }>();
-/** requestIds this process has sent (confirmed sends), so a caller-supplied id is never sent twice. */
+/**
+ * requestIds this process has sent (confirmed sends), so a caller-supplied id is never sent twice.
+ * Bounded like the route map: at most MAX_USED_IDS, oldest dropped first (the bridge's 409 still
+ * guards an id whose route is open).
+ */
+export const MAX_USED_IDS = 1000;
 const usedIds = new Set<string>();
+
+export function markRequestIdUsed(requestId: string): void {
+  usedIds.delete(requestId);
+  usedIds.add(requestId);
+  while (usedIds.size > MAX_USED_IDS) usedIds.delete(usedIds.values().next().value as string);
+}
+
+export function releaseRequestId(requestId: string): void {
+  usedIds.delete(requestId);
+}
+
+export function isRequestIdUsed(requestId: string): boolean {
+  return usedIds.has(requestId);
+}
 
 export function rememberRoute(requestId: string, info: { expiresAt?: string; seen: boolean }): void {
   const prev = known.get(requestId);
@@ -365,14 +384,18 @@ async function deliver(
     replyInfo = { expected: true, requestId: payload.requestId, expiresAt: ex.route.expiresAt };
     rememberRoute(String(payload.requestId), { expiresAt: ex.route.expiresAt, seen: true });
   }
-  usedIds.add(String(payload.requestId));
+  markRequestIdUsed(String(payload.requestId));
   // stderr only (stdout is the MCP stream): the id survives a host timeout in the host's server log. No keys or tokens.
   console.error(`grokbots: send_prompt to ${bot.name}, requestId ${String(payload.requestId)}${replyInfo ? " (reply route open)" : ""}`);
   const res = await postWebhook(bot.url as string, key, body);
   const accepted = res.ok && (res.body as { success?: unknown })?.success !== false;
+  // Definitely not delivered (not_sent): the routine refused it, so the caller may reuse the id.
+  // Kept on sent:"unknown" or an unreadable 2xx (send_unconfirmed): the bot may have it.
+  const notSent = !accepted && res.sent !== "unknown" && res.error !== "webhook_response_read_failed";
+  if (notSent) releaseRequestId(String(payload.requestId));
   // The routine surely did not take it (refused before sending, non-2xx, or success:false): free the
   // bridge slot now. Not on sent:"unknown" or a 2xx whose body could not be read: the bot may still reply.
-  if (replyInfo && !accepted && res.sent !== "unknown" && res.error !== "webhook_response_read_failed") {
+  if (replyInfo && notSent) {
     replyInfo = { ...replyInfo, expected: false, cancelled: await cancelReply(bridge, String(payload.requestId)) };
   }
   let waited: Record<string, unknown> | undefined;
@@ -486,7 +509,7 @@ export async function handleTool(
       if (args.requestId !== undefined) {
         const id = typeof args.requestId === "string" ? args.requestId.trim() : "";
         if (!REQUEST_ID_RE.test(id)) return jsonResult({ ok: false, sent: false, error: "requestId must be 8-64 of A-Z a-z 0-9 _ - (e.g. a UUID). Nothing sent." }, true);
-        if (args.confirm === true && usedIds.has(id)) {
+        if (args.confirm === true && isRequestIdUsed(id)) {
           return jsonResult(
             {
               ok: false,
