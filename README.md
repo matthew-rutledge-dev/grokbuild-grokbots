@@ -8,10 +8,10 @@ Each installer uses their own routine URLs and keys. There's no shared service a
 
 | Piece | Role |
 |-------|------|
-| `grokbots` MCP (one server) | Read tools: `list_bots`, `check_bot`, `describe_boundary` (no network), and `wait_reply` (reads a reply from your optional reply bridge). Write tools: `wake_bot`, `send_prompt`, which make **one** HTTPS POST to the bot's routine and are a dry-run unless `confirm=true`. Optional **read-only mode** (`GROKBOTS_READ_ONLY`) hides the write tools |
+| `grokbots` MCP (one server) | Read tools: `list_bots`, `check_bot`, `describe_boundary` (no network, except one bridge status read for relay bots), and `wait_reply` (reads a reply from your optional reply bridge). Write tools: `wake_bot`, `send_prompt`, which make **one** HTTPS POST (to the bot's routine, or in relay mode to your bridge) and are a dry-run unless `confirm=true`. Optional **read-only mode** (`GROKBOTS_READ_ONLY`) hides the write tools |
 | Skills | `grokbots-send` (caller: how to wake or prompt a bot), `grokbots-roster` (caller: env vars and roster file), `grokbots-routine-setup` (inside the Grok Bot: create or reuse the webhook routine and hand over URL + key safely) |
 
-What it does **not** do: retry, run a relay server, or touch any undocumented gateway. Replies come back only if you run the optional reply bridge (see [Replies](#replies-optional-bridge)); without it, the bot answers in its own app or channel.
+What it does **not** do: retry, run a relay server itself, or touch any undocumented gateway. It can use one you run (see [Relay mode](#relay-mode-bridge-delivers)). Replies come back only if you run the optional reply bridge (see [Replies](#replies-optional-bridge)); without it, the bot answers in its own app or channel.
 
 ## Layout (Grok-canonical, Cursor dual-support)
 
@@ -95,19 +95,42 @@ Why 45 s per call: MCP hosts end a tool call on their own clock, often around 60
 
 **The reply token is visible in the bot's routine run history**, because it is part of the webhook body the routine receives. That is acceptable: it works only for one reply to that one `requestId`, through `/grokbuild/reply`, until it expires (the bridge's `replyTokenTtlSec`, 6 h by default), and it grants no other access. The bridge key never leaves your computer except to the bridge.
 
-`expectReply: false` sends one-way even with a bridge set. Without the bridge variables, `send_prompt` works as before and `wait_reply` returns `bridge_not_configured`. Bridge host setup (env vars, port, firewall): the adapter README in that repo.
+`expectReply: false` sends one-way even with a bridge set (direct mode only). Without the bridge variables, `send_prompt` works as before and `wait_reply` returns `bridge_not_configured`. Bridge host setup (env vars, port, firewall): the adapter README in that repo.
+
+## Relay mode (bridge delivers)
+
+Two ways to reach a bot, chosen per bot:
+
+| Mode | When | Variables on this computer | Who holds the routine key |
+|---|---|---|---|
+| **Direct** | The bot has a webhook here: the env bot (`GROKBOTS_WEBHOOK_URL` + `GROKBOTS_WEBHOOK_KEY`) or a roster entry | Webhook URL + key; add `GROKBOTS_BRIDGE_URL` + `GROKBOTS_BRIDGE_KEY` for replies | This computer |
+| **Relay** (0.1.11+) | No webhook here for that bot name, and `GROKBOTS_BRIDGE_URL` + `GROKBOTS_BRIDGE_KEY` are set | Only the bridge URL and your client token | The bridge host (its private registry) |
+
+A bot with a webhook here always goes direct, unchanged. Any other name goes to the bridge when it is set. With no webhook and no roster at all, everything is relay.
+
+- `send_prompt` (confirmed) makes one `POST <bridge>/grokbuild/prompt` with `Authorization: Bearer <client token>` and `{bot, prompt, requestId, replyHint?}`. `bot` is passed **as given** (trimmed; it must be the bridge's lowercase name, `a-z 0-9 . _ -`). The bridge checks its route table for your client and that bot, delivers to the bot's routine (holding and retrying while the bot's computer sleeps) and answers `202 {requestId, state}` (`delivered` or `held`).
+- The bot answers through the bridge's own callback, so its routine needs the bridge callback setup (the bridge's adapter README), not a reply token in the payload.
+- The wait is the same as direct mode: `untilReply`, `wait`, `timeoutSec` and `wait_reply` long-poll `GET <bridge>/grokbuild/requests/<id>`. Relayed requests stay `delivered` on the bridge after the bot answers (they never report `replied`), so the plugin treats `delivered` with replies as the reply: `waitResult.state: "replied"`. While waiting, `bridgeState` shows `queued` / `held` / `delivered`.
+- Relay never sends `DELETE` (the bridge refuses to cancel a relayed request with 409). An abort keeps the request for a later `wait_reply`. The bridge drops a relayed request after its `replyTtlSec` (1 h by default); a later read reports `expired`.
+- Results: `sent: true` when the bridge accepted it. `not_sent` (id freed) when the bridge refused it: 401 wrong client token, 403 `read_only` or `no_route` (bot not routed for you), 400/413 bad input, 429 limits, 503 with a bridge error (`reply_channel_unset`, `agent_not_ready`). `request_id_in_use` on a 409 (that id was already sent). `send_unconfirmed` (`sent: "unknown"`, id kept, no wait) when there was no answer, a gateway 5xx in front of the bridge, or an unreadable answer: don't resend, call `wait_reply`.
+- `list_bots` with no roster lists the bots the bridge routes for your client (`GET /grokbuild/status`, writes nothing), each `mode: "relay"`, with readiness (bridge writable, reply channel ready). `check_bot` on a relay name does the same check for one bot. With a roster, `list_bots` shows the roster only; other names still relay.
+- `wake_bot` needs a direct webhook; relay bots take `send_prompt`. `expectReply: false` is refused in relay mode. Without a `bot` argument, relay uses `GROKBOTS_DEFAULT_BOT` if set.
+- Read-only: `GROKBOTS_READ_ONLY` hides `send_prompt` here as in direct mode. The bridge has its own read-only switch; while it is on, relay sends come back `not_sent` with `bridgeError: "read_only"` and `list_bots` marks the bots not ready.
+- Needs grok-bot-universal-bridge 0.2.5 or later with the GrokBuild adapter, your client token, and a route row for your client and each bot on the bridge host.
+
+**Moving a bot from direct to relay:** set the bridge variables, check `list_bots` / `check_bot`, send one prompt with `untilReply`, and only after the reply comes back remove that bot's `GROKBOTS_WEBHOOK_URL` / `GROKBOTS_WEBHOOK_KEY` (or roster entry). Both modes coexist, so you can roll back by putting the webhook values back.
 
 ## Plugin variables
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `GROKBOTS_WEBHOOK_URL` | for the env bot | Routine POST URL (https; plain http only to loopback for tests) |
-| `GROKBOTS_WEBHOOK_KEY` | for the env bot | Routine sender key. Never commit it or paste it in chat |
-| `GROKBOTS_DEFAULT_BOT` | no | Roster name of the env bot (default `default`) |
+| `GROKBOTS_WEBHOOK_URL` | for the env bot (direct mode) | Routine POST URL (https; plain http only to loopback for tests) |
+| `GROKBOTS_WEBHOOK_KEY` | for the env bot (direct mode) | Routine sender key. Never commit it or paste it in chat |
+| `GROKBOTS_DEFAULT_BOT` | no | Roster name of the env bot (default `default`); in relay mode with no webhook, the bot used when `bot` is omitted |
 | `GROKBOTS_ROSTER_FILE` | no | JSON roster for several bots; keys come from `keyFile` (recommended) or `keyEnv`, never inline |
 | `GROKBOTS_SENDER` | no | `from` label in each POST (default `grokbuild`) |
-| `GROKBOTS_BRIDGE_URL` | for replies | Base URL of your reply bridge (https; plain http only to loopback for tests). See [Replies](#replies-optional-bridge) |
-| `GROKBOTS_BRIDGE_KEY` | for replies | Your client token for that bridge's GrokBuild adapter. Sent only to the bridge, never in a payload |
+| `GROKBOTS_BRIDGE_URL` | for replies and relay mode | Base URL of your bridge (https; plain http only to loopback for tests). See [Replies](#replies-optional-bridge) and [Relay mode](#relay-mode-bridge-delivers) |
+| `GROKBOTS_BRIDGE_KEY` | for replies and relay mode | Your client token for that bridge's GrokBuild adapter. Sent only to the bridge, never in a payload |
 | `GROKBOTS_WAIT_SEC` | no | Check-in interval of one `wait_reply` / `wait: true` call (default 45, 5-600). Not a time limit |
 | `GROKBOTS_WAIT_MAX_SEC` | no | How long one `untilReply` call may keep waiting, with or without progress updates (default 300, 30-3600) |
 | `GROKBOTS_READ_ONLY` | no | `1`/`true`/`yes`/`on` hides the write tools; `0`/`false`/`no`/`off`/unset = off; **any other value = on** (fails closed, one warning on stderr) |
@@ -119,7 +142,7 @@ Unset variables that a host passes through literally (`${GROKBOTS_WEBHOOK_URL}`)
 | Endpoint | When | Purpose |
 |---|---|---|
 | Your routine's POST URL (`GROKBOTS_WEBHOOK_URL` or roster `url`) | Only on `wake_bot` / `send_prompt` with `confirm=true` | One POST: `Content-Type: application/json`, `Authorization: Bearer <key>`, `X-Automation-Key: <key>`, 8 s timeout, no retry, no redirects |
-| Your reply bridge (`GROKBOTS_BRIDGE_URL`), only if set | `POST /grokbuild/expect` before a confirmed `send_prompt`; `GET /grokbuild/requests/<id>?waitSec=N` on `wait_reply` / `wait: true` | `Authorization: Bearer <bridge key>`, no redirects, 8 s timeout (long-poll: wait + 10 s) |
+| Your reply bridge (`GROKBOTS_BRIDGE_URL`), only if set | Direct: `POST /grokbuild/expect` before a confirmed `send_prompt`. Relay: `POST /grokbuild/prompt` on a confirmed `send_prompt`, `GET /grokbuild/status` on `list_bots` (no roster) / `check_bot` (relay name). Both: `GET /grokbuild/requests/<id>?waitSec=N` on `wait_reply` / `wait: true` | `Authorization: Bearer <bridge key>`, no redirects, 8 s timeout (relay prompt: 20 s; long-poll: wait + 10 s) |
 
 POST bodies: `{kind:"wake", reason, bot, from, sentAt, requestId}` or `{kind:"prompt", prompt, bot, from, replyHint?, sentAt, requestId}`. `bot` is the roster entry name the call was sent as (since 0.1.1; older versions omit it, so treat it as optional), so one routine shared by several roster entries can tell them apart. It is the name only, never a URL, key or key source. The bodies carry no caller keys; with a reply bridge, a prompt body also carries `reply` with a one-time reply token scoped to that `requestId`. Responses are truncated to 2000 chars. Tool output redacts the URL's last path segment and never includes keys. No telemetry, and nothing downloaded at runtime (the bootstrap script runs `npm ci --omit=dev` once to install the pinned runtime and build dependencies from the lockfile; the server itself runs from `dist/` with plain `node`).
 
@@ -133,10 +156,11 @@ Errors come back as fixed codes, never raw network error text. A key that is not
 |---|---|---|
 | `webhook_key_invalid` | `false` | Key refused before the request; nothing went out |
 | `webhook_http_<status>` | `true` | The routine answered with a non-2xx status (401/403 wrong key or header, 404 wrong URL or deleted routine) |
+| `webhook_http_502` / `503` / `504` / `524` | `"unknown"` | A gateway in front of the routine answered, not the routine (since 0.1.11). It may have started the routine before timing out: `send_unconfirmed`, the `requestId` stays used and the reply route is kept; don't resend, use `wait_reply` |
 | `webhook_timeout` | `"unknown"` | No response within 8 s. The request may already have reached the routine |
 | `webhook_network_error` | `"unknown"` | Connection, TLS or refused-redirect failure. The request may or may not have reached the routine |
 | `webhook_response_read_failed` | `true` | The routine answered (`httpStatus` is set), then the connection failed while reading its reply body. The request arrived; don't resend it |
-| `bridge_*` (in `errorCode`) | `false` | Reply bridge refused or unreachable before the send: `bridge_not_configured`, `bridge_key_invalid`, `bridge_http_<status>` (401 wrong bridge key, 403 bridge read-only, 503 bridge public URL unset), `bridge_timeout`, `bridge_network_error`, `bridge_bad_response`. Nothing went to the routine. `wait_reply` uses the same codes in `error` (404 = unknown or expired `requestId`) |
+| `bridge_*` (in `errorCode`) | `false` (relay: `"unknown"` for no answer or a gateway 5xx) | Reply bridge refused or unreachable before the send: `bridge_not_configured`, `bridge_key_invalid`, `bridge_http_<status>` (401 wrong bridge key, 403 bridge read-only, 503 bridge public URL unset), `bridge_timeout`, `bridge_network_error`, `bridge_bad_response`. Nothing went to the routine. `wait_reply` uses the same codes in `error` (404 = unknown or expired `requestId`) |
 
 Nothing is retried. On `sent: "unknown"`, check the bot's own chat before sending again, so it doesn't run twice.
 

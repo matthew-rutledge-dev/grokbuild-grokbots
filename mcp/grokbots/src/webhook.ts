@@ -10,7 +10,9 @@
  *   false     nothing went out (key refused before fetch)
  *   true      an HTTP status line came back, so the request arrived (this includes
  *             webhook_response_read_failed: status received, body cut off)
- *   "unknown" fetch threw (network error, timeout, refused redirect); the request
+ *   "unknown" fetch threw (network error, timeout, refused redirect), or a gateway
+ *             answered 502/503/504/524 (a proxy in front of the routine timed out or lost
+ *             the upstream, possibly after the routine already started); the request
  *             may or may not have reached the routine, so do not assume either way
  */
 import { USER_AGENT } from "./version.js";
@@ -32,6 +34,9 @@ export const KEY_RE = /^[\x21-\x7e]+$/;
 
 export const KEY_INVALID_MESSAGE =
   "webhook key is not valid (printable ASCII only, no spaces or line breaks). Nothing sent.";
+
+/** Gateway statuses: a proxy answered, not the routine, so the routine may or may not have the request. */
+export const GATEWAY_STATUSES: ReadonlySet<number> = new Set([502, 503, 504, 524]);
 
 export function isValidKey(key: unknown): key is string {
   return typeof key === "string" && KEY_RE.test(key);
@@ -76,9 +81,8 @@ export async function postWebhook(url: string, key: string, payload: unknown, ti
     } catch {
       /* keep text */
     }
-    return res.ok
-      ? { ok: true, status: res.status, body, sent: true }
-      : { ok: false, status: res.status, body, error: `webhook_http_${res.status}`, sent: true };
+    if (res.ok) return { ok: true, status: res.status, body, sent: true };
+    return { ok: false, status: res.status, body, error: `webhook_http_${res.status}`, sent: GATEWAY_STATUSES.has(res.status) ? "unknown" : true };
   } catch (e) {
     // No HTTP response. The request may already have gone out (e.g. a timeout after
     // the body was written), so report "unknown" rather than claiming either way.
