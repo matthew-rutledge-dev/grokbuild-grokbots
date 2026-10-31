@@ -2,7 +2,10 @@
  * Tool list and handlers for the grokbots MCP server.
  * Read tools: list_bots, check_bot, describe_boundary (no network).
  * Write tools: wake_bot, send_prompt (one webhook POST each; dry-run unless confirm=true;
- * hidden and refused in read-only mode).
+ * hidden and refused in read-only mode). send_prompt has two modes:
+ *   direct  the bot has a webhook here (env or roster): POST to its routine (+ optional bridge reply route)
+ *   relay   no webhook here, bridge set: POST <bridge>/grokbuild/prompt; the bridge delivers and the
+ *           bot answers through the bridge's callback. Same wait as direct; never DELETEs the request.
  * Reply tool: wait_reply (long-polls the optional bridge for a send_prompt reply; read only).
  */
 import crypto from "node:crypto";
@@ -12,13 +15,17 @@ import { jsonResult, type ToolResult } from "./result.js";
 import { loadRoster, publicBot, redactUrl, type BotEntry } from "./roster.js";
 import { SERVER_NAME, VERSION } from "./version.js";
 import {
+  BRIDGE_BOT_RE,
+  BRIDGE_DEFAULT_BOT_ENV,
   DEFAULT_WAIT_SEC,
   MAX_WAIT_SEC,
+  bridgeStatus,
   cancelReply,
   checkInSec,
   expectReply,
   loadBridge,
   publicBridge,
+  relayPrompt,
   replyUrlPreview,
   untilReplySec,
   waitReply,
@@ -75,13 +82,13 @@ const ALL_TOOLS = [
   {
     name: "list_bots",
     description:
-      "List the Grok Bots on this caller's roster (env default bot + optional GROKBOTS_ROSTER_FILE). Shows name, redacted target host, key source and readiness. Never returns keys or full webhook URLs. No network.",
+      "List the Grok Bots on this caller's roster (env default bot + optional GROKBOTS_ROSTER_FILE), each mode \"direct\". With no roster but GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY set, lists the bots the bridge routes for this client (mode \"relay\", one GET /grokbuild/status, writes nothing). Shows name, redacted target host, key source and readiness. Never returns keys or full webhook URLs. No other network.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "check_bot",
     description:
-      "Validate one bot's config (https URL, key present) without calling it. No network. Use before wake_bot / send_prompt.",
+      "Validate one bot's config (https URL, key present) without calling it. A relay bot (no webhook here, bridge set) is checked with one GET /grokbuild/status (routed, bridge writable, reply channel ready); otherwise no network. Use before wake_bot / send_prompt.",
     inputSchema: { type: "object", properties: { ...botArg }, additionalProperties: false },
   },
   {
@@ -93,7 +100,7 @@ const ALL_TOOLS = [
   {
     name: "wake_bot",
     description:
-      "Wake a Grok Bot by POSTing a small JSON wake event ({kind:\"wake\", reason, bot, from, sentAt, requestId}) to its webhook-triggered routine. Dry-run preview unless confirm=true. One try, 8 s timeout. Hidden in read-only mode.",
+      "Wake a Grok Bot by POSTing a small JSON wake event ({kind:\"wake\", reason, bot, from, sentAt, requestId}) to its webhook-triggered routine. Needs a direct webhook for the bot (relay bots: use send_prompt). Dry-run preview unless confirm=true. One try, 8 s timeout. Hidden in read-only mode.",
     inputSchema: {
       type: "object",
       properties: {
@@ -107,7 +114,7 @@ const ALL_TOOLS = [
   {
     name: "send_prompt",
     description:
-      `Send a prompt to a Grok Bot through its webhook-triggered routine ({kind:\"prompt\", prompt, bot, from, replyHint?, sentAt, requestId}). The bot's routine treats it as untrusted data. Dry-run preview unless confirm=true. Max ${MAX_PROMPT_CHARS} chars, one try, 8 s timeout. With GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY set, the payload also carries reply:{url, requestId, token, expiresAt, how} (a one-time reply token from the bridge, never the bridge key) and the reply can be read with wait_reply or wait=true. Without a bridge, no reply comes back here; the bot answers in its own app/channel. Hidden in read-only mode.`,
+      `Send a prompt to a Grok Bot through its webhook-triggered routine ({kind:\"prompt\", prompt, bot, from, replyHint?, sentAt, requestId}). The bot's routine treats it as untrusted data. Dry-run preview unless confirm=true. Max ${MAX_PROMPT_CHARS} chars, one try, 8 s timeout. With GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY set, the payload also carries reply:{url, requestId, token, expiresAt, how} (a one-time reply token from the bridge, never the bridge key) and the reply can be read with wait_reply or wait=true. Relay mode: when the bot has no webhook here (env or roster) and the bridge is set, the prompt goes to the bridge instead (POST /grokbuild/prompt {bot, prompt, requestId, replyHint?}); the bridge delivers it and the bot answers through the bridge, read the same way. Without a bridge, no reply comes back here; the bot answers in its own app/channel. Hidden in read-only mode.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -119,7 +126,7 @@ const ALL_TOOLS = [
         },
         expectReply: {
           type: "boolean",
-          description: "Ask the bridge for a one-time reply route (default true when GROKBOTS_BRIDGE_URL is set; false sends one-way).",
+          description: "Direct mode: ask the bridge for a one-time reply route (default true when GROKBOTS_BRIDGE_URL is set; false sends one-way). Relay mode always goes through the bridge; false is refused there.",
         },
         requestId: {
           type: "string",
@@ -184,14 +191,14 @@ async function runWait(bridge: BridgeConfig, requestId: string, o: WaitOpts, pro
 }
 
 const NEXT_STEP =
-  "Not a timeout: the bot is still working and the reply route stays open until expiresAt. Tell the user one short line (waitingFor), then call wait_reply again with this requestId. Keep going until state is replied, expired or cancelled.";
+  "Not a timeout: the bot is still working and the reply route stays open until expiresAt (relay: while the bridge keeps the request, 1 h by default). Tell the user one short line (waitingFor), then call wait_reply again with this requestId. Keep going until state is replied, expired or cancelled.";
 
 /**
  * What this process last learned about each reply route (from /expect and reads), so a later
  * 404 can be told apart: a route that expired, one that existed and is gone, or an id the bridge
  * never knew (wrong id, or GROKBOTS_BRIDGE_URL pointing at the wrong path or proxy). Memory only, bounded.
  */
-const known = new Map<string, { expiresAt?: string; seen: boolean }>();
+const known = new Map<string, { expiresAt?: string; seen: boolean; relay?: boolean }>();
 /**
  * requestIds this process has sent (confirmed sends), so a caller-supplied id is never sent twice.
  * Bounded like the route map: at most MAX_USED_IDS, oldest dropped first (the bridge's 409 still
@@ -214,10 +221,10 @@ export function isRequestIdUsed(requestId: string): boolean {
   return usedIds.has(requestId);
 }
 
-export function rememberRoute(requestId: string, info: { expiresAt?: string; seen: boolean }): void {
+export function rememberRoute(requestId: string, info: { expiresAt?: string; seen: boolean; relay?: boolean }): void {
   const prev = known.get(requestId);
   known.delete(requestId);
-  known.set(requestId, { expiresAt: info.expiresAt ?? prev?.expiresAt, seen: info.seen || Boolean(prev?.seen) });
+  known.set(requestId, { expiresAt: info.expiresAt ?? prev?.expiresAt, seen: info.seen || Boolean(prev?.seen), relay: info.relay || prev?.relay });
   while (known.size > 1000) known.delete(known.keys().next().value as string);
 }
 
@@ -233,6 +240,9 @@ function waitBody(w: WaitResult) {
       const seen = Boolean(w.seen || k?.seen);
       if (exp && Date.parse(exp) <= Date.now()) {
         return { ok: false, done: true, requestId: w.requestId, state: "expired", expiresAt: exp, note: "The reply route expired without a reply (the bridge no longer has it)." };
+      }
+      if (seen && k?.relay) {
+        return { ok: false, done: true, requestId: w.requestId, state: "expired", error: w.error, note: "The bridge no longer has this relayed request: it keeps relayed requests for its replyTtlSec (1 h by default), with or without a reply. Stop waiting." };
       }
       if (seen) {
         return { ok: false, done: true, requestId: w.requestId, state: "cancelled", error: w.error, note: "The bridge had this request and no longer has it: cancelled or removed. Stop waiting." };
@@ -282,6 +292,8 @@ function waitBody(w: WaitResult) {
     done: false,
     requestId: w.requestId,
     state: "awaiting_reply",
+    // Relay requests report the bridge's delivery state (queued / held / delivered) while waiting.
+    ...(w.state !== "awaiting_reply" && w.state !== "unknown" ? { bridgeState: w.state } : {}),
     ...timing,
     waitingFor: waitingFor(elapsedSec ?? w.waitedSec),
     next: { tool: "wait_reply", arguments: { requestId: w.requestId } },
@@ -293,21 +305,50 @@ export function listTools(readOnly: boolean) {
   return readOnly ? ALL_TOOLS.filter((t) => !isWriteTool(t.name)) : ALL_TOOLS;
 }
 
-function pickBot(args: Record<string, unknown>): { bot?: BotEntry; error?: string; errors: string[] } {
+type Target = { bot?: BotEntry; relay?: string; error?: string; errors: string[] };
+
+/**
+ * Which bot a call goes to. A bot with a webhook here (env or roster) is always direct.
+ * With allowRelay and the bridge set, any other name is a relay target, passed to the bridge
+ * as given (trimmed, never rewritten); the bridge's route table decides whether it exists.
+ */
+function pickTarget(args: Record<string, unknown>, allowRelay: boolean): Target {
   const roster = loadRoster();
-  const want = typeof args.bot === "string" ? args.bot.trim().toLowerCase() : "";
+  const given = typeof args.bot === "string" ? args.bot.trim() : "";
+  const want = given.toLowerCase();
+  const relayOn = allowRelay && loadBridge().configured;
+  const relay = (name: string): Target =>
+    BRIDGE_BOT_RE.test(name)
+      ? { relay: name, errors: roster.errors }
+      : { error: `bot ${JSON.stringify(name.slice(0, 64))} is not a bridge bot name (lowercase a-z 0-9 . _ -, as list_bots shows it). Nothing sent.`, errors: roster.errors };
   if (!want) {
     if (roster.bots.length === 1) return { bot: roster.bots[0], errors: roster.errors };
+    if (roster.bots.length === 0 && relayOn) {
+      const def = readEnv(BRIDGE_DEFAULT_BOT_ENV) ?? readEnv("GROKBOTS_DEFAULT_BOT");
+      if (def) return relay(def);
+      return { error: `Relay mode: pass bot (call list_bots for the bots the bridge routes for you), or set ${BRIDGE_DEFAULT_BOT_ENV}.`, errors: roster.errors };
+    }
     return {
       error:
         roster.bots.length === 0
-          ? "No bots configured. Set GROKBOTS_WEBHOOK_URL + GROKBOTS_WEBHOOK_KEY, or GROKBOTS_ROSTER_FILE."
+          ? allowRelay
+            ? "No bots configured. Set GROKBOTS_WEBHOOK_URL + GROKBOTS_WEBHOOK_KEY, GROKBOTS_ROSTER_FILE, or GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY (relay mode)."
+            : loadBridge().configured
+              ? "wake_bot needs a direct webhook routine for the bot (GROKBOTS_WEBHOOK_URL + GROKBOTS_WEBHOOK_KEY, or GROKBOTS_ROSTER_FILE). In relay mode use send_prompt."
+              : "No bots configured. Set GROKBOTS_WEBHOOK_URL + GROKBOTS_WEBHOOK_KEY, or GROKBOTS_ROSTER_FILE."
           : `Several bots configured; pass bot (one of: ${roster.bots.map((b) => b.name).join(", ")}).`,
       errors: roster.errors,
     };
   }
   const bot = roster.bots.find((b) => b.name === want);
-  return bot ? { bot, errors: roster.errors } : { error: `Unknown bot ${JSON.stringify(want)}. Call list_bots.`, errors: roster.errors };
+  if (bot) return { bot, errors: roster.errors };
+  if (relayOn) return relay(given);
+  const hint = !allowRelay && loadBridge().configured ? " wake_bot needs a direct webhook for the bot; relay bots take send_prompt." : "";
+  return { error: `Unknown bot ${JSON.stringify(want)}. Call list_bots.${hint}`, errors: roster.errors };
+}
+
+function pickBot(args: Record<string, unknown>): Target {
+  return pickTarget(args, false);
 }
 
 function sender(): string {
@@ -390,7 +431,8 @@ async function deliver(
   const res = await postWebhook(bot.url as string, key, body);
   const accepted = res.ok && (res.body as { success?: unknown })?.success !== false;
   // Definitely not delivered (not_sent): the routine refused it, so the caller may reuse the id.
-  // Kept on sent:"unknown" or an unreadable 2xx (send_unconfirmed): the bot may have it.
+  // Kept on sent:"unknown" (no response, or a gateway 502/503/504/524) or an unreadable 2xx
+  // (send_unconfirmed): the bot may have it, so the id stays used and the route stays open.
   const notSent = !accepted && res.sent !== "unknown" && res.error !== "webhook_response_read_failed";
   if (notSent) releaseRequestId(String(payload.requestId));
   // The routine surely did not take it (refused before sending, non-2xx, or success:false): free the
@@ -430,9 +472,139 @@ async function deliver(
         ? replyInfo
           ? "Routine accepted the POST. The bot runs it on its own and can answer through the bridge: read it with wait_reply (same requestId)."
           : "Routine accepted the POST (expect HTTP 200 with {success:true, runUuid}). The bot runs it on its own; no reply comes back here."
-        : "Not accepted. webhook_http_401/403 = wrong key or header, webhook_http_404 = wrong URL or deleted routine, webhook_timeout / webhook_network_error = no HTTP response (sent: \"unknown\", the routine may or may not have received it), webhook_response_read_failed = the routine answered (see httpStatus) but its reply body could not be read (sent: true, do not resend). Not retried.",
+        : "Not accepted. webhook_http_401/403 = wrong key or header, webhook_http_404 = wrong URL or deleted routine, webhook_timeout / webhook_network_error = no HTTP response, and webhook_http_502/503/504/524 = a gateway answered, not the routine (sent: \"unknown\", the routine may or may not have received it; don't resend, use wait_reply), webhook_response_read_failed = the routine answered (see httpStatus) but its reply body could not be read (sent: true, do not resend). Not retried.",
     },
     !accepted,
+  );
+}
+
+/** The GrokBuild adapter's own 503 reasons on POST /grokbuild/prompt (bridge 0.2.5): a definite refusal. */
+export const BRIDGE_503_REASONS: ReadonlySet<string> = new Set(["reply_channel_unset", "agent_not_ready", "client_auth_unset", "client_token_shared"]);
+
+/**
+ * Relay mode send: one POST <bridge>/grokbuild/prompt with the client key. The bridge delivers
+ * to the bot's routine (it holds the routine key) and the bot answers through the bridge's
+ * callback, so the wait is the same long-poll as direct mode. Never DELETEs: the bridge
+ * refuses to cancel a relayed request (409), and an abort keeps it for a later wait_reply.
+ *   accepted (202, state delivered | held)       -> sent: true, id kept, wait if asked
+ *   refused (4xx, or a 503 with a bridge reason) -> not_sent, id released (the bridge kept nothing)
+ *   409                                          -> request_id_in_use, nothing sent
+ *   no answer / gateway 5xx / unreadable answer  -> send_unconfirmed, id kept, no wait
+ */
+async function relayDeliver(
+  botName: string,
+  payload: Record<string, unknown>,
+  confirm: boolean,
+  replyOpts: ReplyOpts,
+  progress?: ProgressFn,
+  signal?: AbortSignal,
+): Promise<ToolResult> {
+  const bridge = loadBridge();
+  const requestId = String(payload.requestId);
+  const relayBody: Record<string, unknown> = { bot: botName, prompt: payload.prompt, requestId };
+  if (typeof payload.replyHint === "string") relayBody.replyHint = payload.replyHint;
+  const preview = { bot: botName, mode: "relay", target: publicBridge(bridge).target, endpoint: "POST /grokbuild/prompt", payload: relayBody };
+  if (bridge.problems.length) {
+    return jsonResult({ ok: false, sent: false, ...preview, problems: bridge.problems, error: "The bridge settings are not valid. Nothing sent." }, true);
+  }
+  if (!confirm) {
+    return jsonResult({
+      ok: true,
+      dryRun: true,
+      sent: false,
+      ...preview,
+      note: "Dry-run preview only. Re-call with confirm=true to send once through the bridge; the bridge delivers it to this bot's routine and the bot answers through the bridge.",
+    });
+  }
+  // Fail fast: only send to a bot the bridge routes for this client (one read, writes nothing).
+  const st = await bridgeStatus(bridge);
+  if (!st.ok) {
+    return jsonResult(
+      { ok: false, sent: false, ...preview, requestId, errorCode: st.error, httpStatus: st.status, bridgeError: st.detail, error: "Could not read the bridge's routed bots (GET /grokbuild/status), so nothing was sent. 401 = wrong GROKBOTS_BRIDGE_KEY; bridge_timeout / bridge_network_error = bridge unreachable." },
+      true,
+    );
+  }
+  if (!st.bots.includes(botName)) {
+    const rosterNames = loadRoster().bots.map((b) => b.name);
+    const direct = rosterNames.length ? ` Direct (webhook) bots here: ${rosterNames.join(", ")}.` : "";
+    return jsonResult(
+      {
+        ok: false,
+        sent: false,
+        ...preview,
+        requestId,
+        errorCode: "bot_not_routed",
+        routedBots: st.bots,
+        ...(rosterNames.length ? { rosterBots: rosterNames } : {}),
+        error: `The bridge does not route bot ${JSON.stringify(botName)} for this client, so nothing was sent. Routed bots: ${st.bots.length ? st.bots.join(", ") : "(none)"}.${direct} Pass one of them as bot, or set ${BRIDGE_DEFAULT_BOT_ENV} to a routed one.`,
+      },
+      true,
+    );
+  }
+  markRequestIdUsed(requestId);
+  console.error(`grokbots: send_prompt to ${botName} (relay), requestId ${requestId}`);
+  const r = await relayPrompt(bridge, { bot: botName, prompt: String(payload.prompt), requestId, replyHint: relayBody.replyHint as string | undefined });
+  if (!r.ok && r.status === 409) {
+    releaseRequestId(requestId);
+    return jsonResult(
+      {
+        ok: false,
+        sent: false,
+        ...preview,
+        requestId,
+        errorCode: "request_id_in_use",
+        httpStatus: 409,
+        next: { tool: "wait_reply", arguments: { requestId } },
+        error: "The bridge already has this requestId, so it was sent before. Nothing sent: don't resend, call wait_reply with this requestId (or use a new id for a new prompt).",
+      },
+      true,
+    );
+  }
+  // The bridge itself refused: nothing was recorded or delivered. A 503 counts only with one of the
+  // bridge's own reasons; any other 503 (e.g. a proxy's "Service Unavailable") is unconfirmed.
+  const refused =
+    !r.ok &&
+    (r.error === "bridge_not_configured" ||
+      r.error === "bridge_key_invalid" ||
+      (r.status >= 400 && r.status < 500) ||
+      (r.status === 503 && typeof r.detail === "string" && BRIDGE_503_REASONS.has(r.detail)));
+  const unconfirmed = !r.ok && !refused;
+  if (refused) releaseRequestId(requestId);
+  if (r.ok) rememberRoute(requestId, { seen: true, relay: true });
+  let waited: Record<string, unknown> | undefined;
+  if (replyOpts.wait) {
+    if (r.ok) waited = await runWait(bridge, requestId, replyOpts, progress, signal, `sent to ${botName} through the bridge, requestId ${requestId}: waiting for the reply`);
+    else if (unconfirmed) {
+      waited = {
+        ok: false,
+        done: false,
+        requestId,
+        state: "send_unconfirmed",
+        next: { tool: "wait_reply", arguments: { requestId } },
+        note: "The bridge did not confirm the send (no answer, or a gateway error in front of it), so this call did not wait. It may have the prompt: don't resend; call wait_reply with this requestId.",
+      };
+    } else waited = { ok: false, done: true, requestId, state: "not_sent", note: "The bridge refused the prompt, so there is nothing to wait for (see bridgeError)." };
+  }
+  return jsonResult(
+    {
+      ok: r.ok,
+      mode: "relay",
+      sent: r.ok ? true : unconfirmed ? "unknown" : false,
+      bot: botName,
+      target: preview.target,
+      requestId,
+      ...(r.ok ? { bridgeState: r.state, httpStatus: r.status, reply: { expected: true, requestId, via: "bridge" } } : { httpStatus: r.status, errorCode: r.error, bridgeError: r.detail }),
+      ...(unconfirmed ? { reply: { expected: true, requestId, via: "bridge" } } : {}),
+      ...(waited ? { waitResult: waited } : {}),
+      note: r.ok
+        ? r.state === "held"
+          ? "The bridge accepted the prompt and is holding it until the bot's computer is reachable (it retries and wakes it). Read the reply with wait_reply (same requestId)."
+          : "The bridge delivered the prompt to the bot's routine. Read the reply with wait_reply (same requestId)."
+        : unconfirmed
+          ? "Not confirmed: bridge_timeout / bridge_network_error / a gateway 5xx / bridge_bad_response. The bridge may have taken it: don't resend; call wait_reply with this requestId."
+          : "Refused by the bridge, nothing delivered: 401 wrong GROKBOTS_BRIDGE_KEY, 403 read_only / no_route (bot not routed for this client), 400/413 bad input, 429 rate or open-request limit, 503 reply_channel_unset / agent_not_ready / client_auth_unset / client_token_shared.",
+    },
+    !r.ok,
   );
 }
 
@@ -444,6 +616,28 @@ export async function handleTool(
   switch (name) {
     case "list_bots": {
       const r = loadRoster();
+      const bridge = loadBridge();
+      if (r.bots.length === 0 && bridge.configured) {
+        // No roster: relay mode. The bridge's route table is the list (names as the bridge has them).
+        const st = await bridgeStatus(bridge);
+        const target = publicBridge(bridge).target;
+        if (!st.ok) {
+          return jsonResult({ ok: false, mode: "relay", count: 0, bots: [], target, errorCode: st.error, httpStatus: st.status, bridgeError: st.detail, rosterFile: r.rosterFile ? "set" : "not set", errors: r.errors }, true);
+        }
+        const problems = [
+          ...(st.readOnly !== false ? ["bridge is read-only (prompts refused)"] : []),
+          ...(st.replyChannel !== "ready" ? ["bridge reply channel not ready (prompts refused)"] : []),
+        ];
+        return jsonResult({
+          ok: true,
+          mode: "relay",
+          count: st.bots.length,
+          bots: st.bots.map((name) => ({ name, source: "bridge", mode: "relay", target, ready: problems.length === 0, problems })),
+          bridge: { readOnly: st.readOnly, replyChannel: st.replyChannel },
+          rosterFile: r.rosterFile ? "set" : "not set",
+          errors: r.errors,
+        });
+      }
       return jsonResult({
         ok: true,
         count: r.bots.length,
@@ -453,7 +647,19 @@ export async function handleTool(
       });
     }
     case "check_bot": {
-      const p = pickBot(args);
+      const p = pickTarget(args, true);
+      if (p.relay) {
+        const bridge = loadBridge();
+        const target = publicBridge(bridge).target;
+        const st = await bridgeStatus(bridge);
+        if (!st.ok) return jsonResult({ ok: false, name: p.relay, mode: "relay", target, errorCode: st.error, httpStatus: st.status, bridgeError: st.detail, network: "GET /grokbuild/status" }, true);
+        const problems = [
+          ...(st.bots.includes(p.relay) ? [] : ["not routed for this client on the bridge (call list_bots)"]),
+          ...(st.readOnly !== false ? ["bridge is read-only (prompts refused)"] : []),
+          ...(st.replyChannel !== "ready" ? ["bridge reply channel not ready (prompts refused)"] : []),
+        ];
+        return jsonResult({ ok: problems.length === 0, name: p.relay, source: "bridge", mode: "relay", target, ready: problems.length === 0, problems, rosterErrors: p.errors, network: "GET /grokbuild/status (writes nothing)" });
+      }
       if (!p.bot) return jsonResult({ ok: false, error: p.error, rosterErrors: p.errors }, true);
       const pub = publicBot(p.bot);
       return jsonResult({ ok: pub.ready, ...pub, rosterErrors: p.errors, network: "none (config check only)" });
@@ -471,6 +677,11 @@ export async function handleTool(
         headers: ["Authorization: Bearer <key>", "X-Automation-Key: <key>"],
         replyBridge: publicBridge(loadBridge()),
         replies: "with GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY: send_prompt adds a one-time reply route and wait_reply reads the reply from the bridge; without them, none returned (the bot reports in its own app/channel)",
+        modes: {
+          direct: "the bot has a webhook here (env or roster): one POST to its routine",
+          relay: "no webhook here for the bot and the bridge is set: one POST to <bridge>/grokbuild/prompt; the bridge holds the routine key, delivers, and returns the bot's reply",
+          active: loadRoster().bots.length ? (loadBridge().configured ? "direct for roster bots, relay for other names" : "direct") : loadBridge().configured ? "relay" : "none",
+        },
         secrets: "keys come from env vars or key files only; never returned or logged",
         readTools: READ_TOOLS,
         writeTools: ctx.readOnly.readOnly ? [] : WRITE_TOOLS,
@@ -495,13 +706,14 @@ export async function handleTool(
       if (prompt.length > MAX_PROMPT_CHARS) {
         return jsonResult({ ok: false, sent: false, error: `prompt is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}. Nothing sent.` }, true);
       }
-      const p = pickBot(args);
-      if (!p.bot) return jsonResult({ ok: false, sent: false, error: p.error, rosterErrors: p.errors }, true);
+      const p = pickTarget(args, true);
+      if (!p.bot && !p.relay) return jsonResult({ ok: false, sent: false, error: p.error, rosterErrors: p.errors }, true);
+      const botName = p.bot ? p.bot.name : (p.relay as string);
       const replyHint = typeof args.replyHint === "string" ? args.replyHint.trim().slice(0, 200) : undefined;
       const payload: Record<string, unknown> = {
         kind: "prompt",
         prompt,
-        bot: p.bot.name,
+        bot: botName,
         from: sender(),
         sentAt: new Date().toISOString(),
         requestId: crypto.randomUUID(),
@@ -532,14 +744,14 @@ export async function handleTool(
       if (wantWait && !expect) {
         return jsonResult({ ok: false, sent: false, error: "Waiting (wait, untilReply or timeoutSec) needs a reply route: set GROKBOTS_BRIDGE_URL + GROKBOTS_BRIDGE_KEY and leave expectReply on. Nothing sent." }, true);
       }
-      return deliver(
-        p.bot,
-        payload,
-        args.confirm === true,
-        { expectReply: expect, wait: wantWait, timeoutSec: timeoutOf(args), untilReply: args.untilReply === true },
-        ctx.progress,
-        ctx.signal,
-      );
+      const opts = { expectReply: expect, wait: wantWait, timeoutSec: timeoutOf(args), untilReply: args.untilReply === true };
+      if (p.relay) {
+        if (args.expectReply === false) {
+          return jsonResult({ ok: false, sent: false, bot: botName, mode: "relay", error: "expectReply: false needs a direct webhook for this bot; in relay mode the prompt always goes through the bridge. Nothing sent." }, true);
+        }
+        return relayDeliver(p.relay, payload, args.confirm === true, opts, ctx.progress, ctx.signal);
+      }
+      return deliver(p.bot as BotEntry, payload, args.confirm === true, opts, ctx.progress, ctx.signal);
     }
     case "wait_reply": {
       const requestId = typeof args.requestId === "string" ? args.requestId.trim() : "";

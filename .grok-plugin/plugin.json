@@ -1,6 +1,6 @@
 {
   "name": "grokbuild-grokbots",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Let Grok Build (or Cursor) wake a Grok Bot or send it a prompt through the bot's own webhook-triggered routine. One grokbots MCP server with a roster, confirm-gated sends and an optional read-only mode, plus setup skills. Each installer uses their own routine URL and key.",
   "author": {
     "name": "Matthew Rutledge",
@@ -27,7 +27,7 @@
       "GROKBOTS_WEBHOOK_URL": {
         "type": "string",
         "title": "Default bot webhook URL",
-        "description": "Optional. POST URL of YOUR Grok Bot's webhook-triggered routine (copy it from the routine panel; placeholder example https://example.com/webhook). https only. Leave blank if you use GROKBOTS_ROSTER_FILE only."
+        "description": "Optional. POST URL of YOUR Grok Bot's webhook-triggered routine (copy it from the routine panel; placeholder example https://example.com/webhook). https only. Leave blank if you use GROKBOTS_ROSTER_FILE only, or relay mode through your bridge."
       },
       "GROKBOTS_WEBHOOK_KEY": {
         "type": "string",
@@ -57,12 +57,17 @@
       "GROKBOTS_BRIDGE_URL": {
         "type": "string",
         "title": "Reply bridge URL",
-        "description": "Optional. Base URL of YOUR grok-bot-universal-bridge with the GrokBuild adapter (placeholder example https://bridge.example.com). When set with GROKBOTS_BRIDGE_KEY, send_prompt asks it for a one-time reply route and wait_reply reads the bot's reply. https only (plain http only to loopback)."
+        "description": "Optional. Base URL of YOUR grok-bot-universal-bridge with the GrokBuild adapter (placeholder example https://bridge.example.com). When set with GROKBOTS_BRIDGE_KEY, send_prompt asks it for a one-time reply route and wait_reply reads the bot's reply; a bot with no webhook here is sent through the bridge instead (relay mode, 0.1.12+). https only (plain http only to loopback)."
       },
       "GROKBOTS_BRIDGE_KEY": {
         "type": "string",
         "title": "Reply bridge client key",
         "description": "Optional. Your client token for that bridge's GrokBuild adapter, sent only as Authorization: Bearer to the bridge. Never put in a prompt or payload; never commit or paste it in chat."
+      },
+      "GROKBOTS_BRIDGE_DEFAULT_BOT": {
+        "type": "string",
+        "title": "Relay default bot",
+        "description": "Optional. Relay mode only: the bridge bot name used when send_prompt gets no bot and no webhook bot applies (lowercase, as list_bots shows it, e.g. example-agent). Falls back to GROKBOTS_DEFAULT_BOT."
       },
       "GROKBOTS_WAIT_SEC": {
         "type": "string",
@@ -72,7 +77,7 @@
       "GROKBOTS_WAIT_MAX_SEC": {
         "type": "string",
         "title": "untilReply budget (seconds)",
-        "description": "Optional. How long one untilReply call may keep waiting while the host receives progress notifications (default 300, 30-3600)."
+        "description": "Optional. How long one untilReply call may keep waiting, with or without progress notifications (default 300, 30-3600)."
       }
     },
     "required": []

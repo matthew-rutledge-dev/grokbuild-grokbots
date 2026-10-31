@@ -1,7 +1,12 @@
 /**
  * Optional reply path through a grok-bot-universal-bridge GrokBuild adapter.
  *
+ * Direct mode (this caller posts to the bot's webhook routine itself):
  *   POST <bridge>/grokbuild/expect          client key -> { replyUrl, replyToken, expiresAt }
+ * Relay mode (no webhook for the bot here; the bridge delivers):
+ *   POST <bridge>/grokbuild/prompt          client key -> { requestId, state }
+ *   GET  <bridge>/grokbuild/status          client key -> { bots[], readOnly, replyChannel }
+ * Both:
  *   GET  <bridge>/grokbuild/requests/<id>?waitSec=N   client key -> { state, replies[] }
  *
  * The client key (GROKBOTS_BRIDGE_KEY) only ever goes in the Authorization header
@@ -15,6 +20,8 @@ import { KEY_RE, webhookErrorCode } from "./webhook.js";
 
 export const BRIDGE_URL_ENV = "GROKBOTS_BRIDGE_URL";
 export const BRIDGE_KEY_ENV = "GROKBOTS_BRIDGE_KEY";
+/** Relay mode: bot used when send_prompt gets no bot (falls back to GROKBOTS_DEFAULT_BOT). */
+export const BRIDGE_DEFAULT_BOT_ENV = "GROKBOTS_BRIDGE_DEFAULT_BOT";
 /** Longest single long-poll asked of the bridge (its maxWaitSec default is 25). */
 export const POLL_SEC = 25;
 export const WAIT_SEC_ENV = "GROKBOTS_WAIT_SEC";
@@ -169,6 +176,52 @@ export async function expectReply(
 export async function cancelReply(b: BridgeConfig, requestId: string): Promise<boolean> {
   const r = await call(b, "DELETE", `/grokbuild/requests/${encodeURIComponent(requestId)}`, undefined, 5000);
   return r.ok;
+}
+
+/** Bot aliases the bridge accepts (lowercase, as in its registry). Passed through as given, never rewritten. */
+export const BRIDGE_BOT_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export type RelayResult =
+  | { ok: true; status: number; requestId: string; state: string }
+  | { ok: false; status: number; error: BridgeErrorCode; detail?: string };
+
+/**
+ * Relay mode: the bridge delivers the prompt to the bot's routine itself (it holds the
+ * routine key), so this caller needs no webhook URL or key.
+ *   POST <bridge>/grokbuild/prompt  { bot, prompt, requestId, replyHint? } -> 202 { requestId, state }
+ * The bot answers through the bridge's own callback; the reply is read with waitReply.
+ * Longer timeout than /expect: the bridge makes its first delivery try before it answers.
+ */
+export async function relayPrompt(
+  b: BridgeConfig,
+  msg: { bot: string; prompt: string; requestId: string; replyHint?: string },
+  timeoutMs = 20_000,
+): Promise<RelayResult> {
+  const body: Record<string, string> = { bot: msg.bot, prompt: msg.prompt, requestId: msg.requestId };
+  if (msg.replyHint) body.replyHint = msg.replyHint;
+  const r = await call(b, "POST", "/grokbuild/prompt", body, timeoutMs);
+  if (!r.ok) return r;
+  const state = typeof r.body.state === "string" ? r.body.state : "unknown";
+  return { ok: true, status: r.status, requestId: typeof r.body.requestId === "string" ? r.body.requestId : msg.requestId, state };
+}
+
+export type BridgeStatus =
+  | { ok: true; client?: string; readOnly?: boolean; replyChannel?: string; directReplies?: string; bots: string[] }
+  | { ok: false; status: number; error: BridgeErrorCode; detail?: string };
+
+/** GET <bridge>/grokbuild/status: which bots this client token is routed to (writes nothing on the bridge). */
+export async function bridgeStatus(b: BridgeConfig): Promise<BridgeStatus> {
+  const r = await call(b, "GET", "/grokbuild/status", undefined, 8000);
+  if (!r.ok) return r;
+  const bots = Array.isArray(r.body.bots) ? (r.body.bots as unknown[]).filter((x): x is string => typeof x === "string" && BRIDGE_BOT_RE.test(x)) : [];
+  return {
+    ok: true,
+    client: typeof r.body.client === "string" ? r.body.client : undefined,
+    readOnly: typeof r.body.readOnly === "boolean" ? r.body.readOnly : undefined,
+    replyChannel: typeof r.body.replyChannel === "string" ? r.body.replyChannel : undefined,
+    directReplies: typeof r.body.directReplies === "string" ? r.body.directReplies : undefined,
+    bots: [...new Set(bots)],
+  };
 }
 
 export type Reply = { content: string; at?: string };
